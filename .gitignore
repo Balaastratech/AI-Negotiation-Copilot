@@ -64,7 +64,6 @@ ehthumbs.db
 Thumbs.db
 
 # Project specific
-.planning/
 .agents/
 .opencode/
 .git/index.lock
