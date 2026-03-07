@@ -13,6 +13,8 @@ export class NegotiationWebSocket {
   private audioManager: AudioWorkletManager;
   private messageListeners: Set<(message: any) => void> = new Set();
   private closeListeners: Set<() => void> = new Set();
+  private errorListeners: Set<(error: any) => void> = new Set();
+  private pendingConnection: { resolve: () => void, reject: (reason?: any) => void } | null = null;
 
   constructor(url: string, audioManager: AudioWorkletManager) {
     this.url = url;
@@ -21,20 +23,34 @@ export class NegotiationWebSocket {
 
   connect(): Promise<void> {
     return new Promise((resolve, reject) => {
+      this.pendingConnection = { resolve, reject };
       this.ws = new WebSocket(this.url);
       
       // We expect binary data for audio
       this.ws.binaryType = 'arraybuffer';
 
       this.ws.onopen = () => {
-        resolve();
+        if (this.pendingConnection) {
+          this.pendingConnection.resolve();
+          this.pendingConnection = null;
+        }
       };
 
       this.ws.onerror = (error) => {
-        reject(error);
+        if (this.pendingConnection) {
+          this.pendingConnection.reject(error);
+          this.pendingConnection = null;
+        } else {
+          // Propagate errors occurring after initial connection
+          this.errorListeners.forEach(listener => listener(error));
+        }
       };
 
       this.ws.onclose = () => {
+        if (this.pendingConnection) {
+          this.pendingConnection.reject(new Error('WebSocket closed before connection established'));
+          this.pendingConnection = null;
+        }
         this.closeListeners.forEach(listener => listener());
       };
 
@@ -60,6 +76,11 @@ export class NegotiationWebSocket {
   }
 
   disconnect(): void {
+    if (this.pendingConnection) {
+      this.pendingConnection.reject(new Error('WebSocket disconnected before connection established'));
+      this.pendingConnection = null;
+    }
+
     if (this.ws) {
       this.ws.close();
       this.ws = null;
@@ -92,5 +113,10 @@ export class NegotiationWebSocket {
   onClose(listener: () => void): () => void {
     this.closeListeners.add(listener);
     return () => this.closeListeners.delete(listener);
+  }
+
+  onError(listener: (error: any) => void): () => void {
+    this.errorListeners.add(listener);
+    return () => this.errorListeners.delete(listener);
   }
 }
