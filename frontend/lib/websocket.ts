@@ -21,11 +21,26 @@ export class NegotiationWebSocket {
     this.audioManager = audioManager;
   }
 
+  get isConnected(): boolean {
+    return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
+  }
+
+  get isConnecting(): boolean {
+    return this.ws !== null && this.ws.readyState === WebSocket.CONNECTING;
+  }
+
   connect(): Promise<void> {
+    if (this.pendingConnection) {
+      return Promise.reject(new Error('WebSocket connection already pending'));
+    }
+    if (this.isConnected) {
+      return Promise.resolve();
+    }
+
     return new Promise((resolve, reject) => {
       this.pendingConnection = { resolve, reject };
       this.ws = new WebSocket(this.url);
-      
+
       // We expect binary data for audio
       this.ws.binaryType = 'arraybuffer';
 
@@ -77,7 +92,6 @@ export class NegotiationWebSocket {
 
   disconnect(): void {
     if (this.pendingConnection) {
-      this.pendingConnection.reject(new Error('WebSocket disconnected before connection established'));
       this.pendingConnection = null;
     }
 

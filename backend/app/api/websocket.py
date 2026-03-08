@@ -18,6 +18,8 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     await connection_manager.register(websocket, session_id, session)
     
+    logger.info(f"WebSocket connection established [session={session_id}]")
+    
     await websocket.send_json({
         "type": "CONNECTION_ESTABLISHED",
         "payload": {
@@ -28,21 +30,36 @@ async def websocket_endpoint(websocket: WebSocket):
     
     try:
         while True:
-            message = await websocket.receive()
-            
-            if "bytes" in message and message["bytes"]:
-                if not await NegotiationEngine.validate_message(websocket, session, "AUDIO_CHUNK"):
-                    continue
-                await NegotiationEngine.handle_audio_chunk(session, message["bytes"])
+            try:
+                message = await websocket.receive()
                 
-            elif "text" in message and message["text"]:
-                data = json.loads(message["text"])
-                msg_type = data.get("type", "UNKNOWN")
+                if message.get("type") == "websocket.disconnect":
+                    logger.info(f"Client disconnected via ASGI [session={session_id}]")
+                    break
                 
-                if not await NegotiationEngine.validate_message(websocket, session, msg_type):
-                    continue
-                
-                await NegotiationEngine.route_message(websocket, session, msg_type, data.get("payload", {}))
+                if "bytes" in message and message["bytes"]:
+                    if not await NegotiationEngine.validate_message(websocket, session, "AUDIO_CHUNK"):
+                        continue
+                    await NegotiationEngine.handle_audio_chunk(session, message["bytes"])
+                    
+                elif "text" in message and message["text"]:
+                    data = json.loads(message["text"])
+                    msg_type = data.get("type", "UNKNOWN")
+                    
+                    logger.debug(f"Received message type: {msg_type} [session={session_id}]")
+                    
+                    if not await NegotiationEngine.validate_message(websocket, session, msg_type):
+                        continue
+                    
+                    await NegotiationEngine.route_message(websocket, session, msg_type, data.get("payload", {}))
+                    
+            except json.JSONDecodeError as e:
+                logger.error(f"Invalid JSON received [session={session_id}]: {e}")
+                await websocket.send_json({
+                    "type": "ERROR",
+                    "payload": {"code": "INVALID_JSON", "message": "Invalid message format."}
+                })
+                continue
                 
     except WebSocketDisconnect:
         logger.info(f"Client disconnected [session={session_id}]")
@@ -56,4 +73,5 @@ async def websocket_endpoint(websocket: WebSocket):
         except Exception:
             pass
     finally:
+        logger.info(f"Cleaning up WebSocket connection [session={session_id}]")
         await connection_manager.unregister(session_id)

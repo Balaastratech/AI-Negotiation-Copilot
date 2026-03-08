@@ -28,6 +28,9 @@ export function StrategyPanel({ strategy }: StrategyPanelProps) {
     walkaway_threshold,
   } = strategy;
 
+  const clampedConfidence = Math.min(1, Math.max(0, confidence));
+  const confidencePercent = Math.round(clampedConfidence * 100);
+
   return (
     <div className="h-full w-full bg-white rounded-xl shadow-sm border border-neutral-200 overflow-hidden flex flex-col flex-grow">
       {/* Header */}
@@ -42,9 +45,9 @@ export function StrategyPanel({ strategy }: StrategyPanelProps) {
         </div>
         <div className="flex items-center space-x-1" title="AI Confidence Score">
           <div className="h-2 w-16 bg-neutral-200 rounded-full overflow-hidden">
-            <div className="h-full bg-green-500" style={{ width: `${Math.round(confidence * 100)}%` }} />
+            <div className="h-full bg-green-500" style={{ width: `${confidencePercent}%` }} />
           </div>
-          <span className="text-xs text-neutral-500 font-medium ml-2">{Math.round(confidence * 100)}%</span>
+          <span className="text-xs text-neutral-500 font-medium ml-2">{confidencePercent}%</span>
         </div>
       </div>
 

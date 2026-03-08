@@ -27,6 +27,8 @@ class NegotiationSession(BaseModel):
     
     # Gemini Live session handle (not serialized - runtime only)
     live_session: Optional[Any] = None
+    # Async context manager returned by open_live_session – kept so __aexit__ can be called on end
+    live_session_cm: Optional[Any] = None
     
     # Outcome tracking
     initial_price: Optional[float] = None

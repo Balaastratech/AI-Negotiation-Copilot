@@ -8,15 +8,24 @@ class PCMCaptureProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     this._buffer = [];
-    this._bufferSize = 4096;
+    this._bufferSize = 1600;  // 100ms at 16kHz - optimal balance
     this._targetSampleRate = 16000;
     this._resampleAccumulator = 0;
     
     this.port.onmessage = (event) => {
       if (event.data === 'flush' && this._buffer.length > 0) {
-        const int16 = new Int16Array(this._buffer);
-        this.port.postMessage(int16.buffer, [int16.buffer]);
+        const samples = this._buffer;
         this._buffer = [];
+        
+        // Use DataView to ensure little-endian encoding
+        const arrayBuffer = new ArrayBuffer(samples.length * 2);
+        const dataView = new DataView(arrayBuffer);
+        
+        for (let i = 0; i < samples.length; i++) {
+          dataView.setInt16(i * 2, samples[i], true); // true = little-endian
+        }
+        
+        this.port.postMessage(arrayBuffer, [arrayBuffer]);
       }
     };
   }
@@ -40,8 +49,20 @@ class PCMCaptureProcessor extends AudioWorkletProcessor {
     }
 
     if (this._buffer.length >= this._bufferSize) {
-      const int16 = new Int16Array(this._buffer.splice(0, this._bufferSize));
-      this.port.postMessage(int16.buffer, [int16.buffer]);
+      const samples = this._buffer.splice(0, this._bufferSize);
+      
+      // Use DataView to ensure little-endian encoding
+      // This guarantees the format matches what Gemini expects: s16le (signed 16-bit little-endian)
+      const arrayBuffer = new ArrayBuffer(samples.length * 2);
+      const dataView = new DataView(arrayBuffer);
+      
+      for (let i = 0; i < samples.length; i++) {
+        // Explicitly write as little-endian Int16
+        // Second parameter (true) forces little-endian byte order
+        dataView.setInt16(i * 2, samples[i], true);
+      }
+      
+      this.port.postMessage(arrayBuffer, [arrayBuffer]);
     }
 
     return true; // keep processor alive

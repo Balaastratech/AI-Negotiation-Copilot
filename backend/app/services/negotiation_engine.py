@@ -2,6 +2,8 @@ import logging
 import asyncio
 from typing import Dict
 import time
+import re
+import json
 
 from fastapi import WebSocket
 
@@ -12,6 +14,7 @@ from app.services.gemini_client import (
     send_audio_chunk,
     receive_responses,
     monitor_session_lifetime,
+    handle_gemini_text,
 )
 from app.config import settings
 
@@ -42,6 +45,10 @@ class NegotiationEngine:
     ) -> bool:
         allowed = VALID_MESSAGES.get(session.state, [])
         if message_type not in allowed:
+            # Silently drop early audio chunks to prevent log spam and frontend errors
+            if message_type == "AUDIO_CHUNK" and session.state in (NegotiationState.IDLE, NegotiationState.CONSENTED):
+                return False
+
             error = ERROR_CODES.get(session.state, {"code": "INVALID_STATE", "message": "Invalid operation."})
             await websocket.send_json({"type": "ERROR", "payload": error})
             logger.warning(
@@ -165,3 +172,23 @@ class NegotiationEngine:
             await NegotiationEngine.handle_end(session, payload, websocket)
         else:
             logger.warning(f"Unknown message type {msg_type}")
+
+def _build_context_summary(session: NegotiationSession) -> str:
+    original = session.context or ""
+    last_strategy = {}
+    if session.strategy_history:
+        last_strategy = session.strategy_history[-1]
+    
+    summary = f"Original Context: {original}\n"
+    if last_strategy:
+        summary += f"Last Strategy: {json.dumps(last_strategy)}\n"
+        
+    recent_transcript = session.transcript[-10:] if session.transcript else []
+    if recent_transcript:
+        summary += "Recent Transcript:\n"
+        for entry in recent_transcript:
+            speaker = entry.get("speaker", "Unknown")
+            text = entry.get("text", "")
+            summary += f"{speaker}: {text}\n"
+            
+    return summary
