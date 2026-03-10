@@ -1,287 +1,154 @@
 # Coding Conventions
 
-**Analysis Date:** 2026-03-07
+**Analysis Date:** 2026-03-10
 
 ## Naming Patterns
 
-### Files
+**Files:**
+- Components: `PascalCase.tsx` - e.g., `ValidationErrors.tsx`, `NegotiationDashboard.tsx`
+- Hooks: `camelCase.ts` with `use` prefix - e.g., `useNegotiationState.ts`, `useAskAI.ts`
+- Types/Interfaces: `PascalCase.ts` - e.g., `types.ts`
+- Tests: Same name as file with `.test.ts` or `.test.tsx` suffix - e.g., `useNegotiationState.test.ts`
 
-**TypeScript/React:**
-- Components use PascalCase with `.tsx` extension (e.g., `page.tsx`, `layout.tsx`)
-- Utilities would use camelCase with `.ts` extension
+**Functions:**
+- Hooks: `useCamelCase` - e.g., `useNegotiationState`, `useAskAI`
+- Component functions: `PascalCase` - e.g., `ValidationErrors`, `AskAIButton`
+- Helper functions: `camelCase` - e.g., `extractPriceFromText`
+- Event handlers: `handleCamelCase` - e.g., `handleEnrollmentComplete`, `handleSpeakerSelected`
 
-**Python:**
-- Modules use snake_case (e.g., `main.py`, `config.py`)
-- Classes use PascalCase (e.g., `Config`, `Settings`)
+**Variables:**
+- camelCase: `negotiationState`, `validationErrors`, `isLoading`
+- Boolean prefixes: `is`, `has`, `can` - e.g., `isResearching`, `hasError`
+- Refs: `camelCase` with `Ref` suffix - e.g., `wsRef`, `audioManagerRef`
 
-### Directories
-
-- **Frontend:** `app/` for Next.js App Router structure
-- **Backend:** `app/` for Python package structure
-
-### Variables and Functions
-
-**TypeScript/JavaScript:**
-- camelCase (e.g., `metadata`, `children`)
-
-**Python:**
-- snake_case (e.g., `gemini_api_key`, `log_level`)
-
-### Types (TypeScript)
-
-- PascalCase (e.g., `Metadata` from Next.js)
+**Types:**
+- Interfaces: PascalCase - e.g., `NegotiationState`, `ValidationError`, `TranscriptEntry`
+- Type aliases: PascalCase - e.g., `Action` for reducer actions
+- Enum-like unions: PascalCase with literal types - e.g., `'USER' | 'COUNTERPARTY'`
 
 ## Code Style
 
-### Formatting
+**Formatting:**
+- No explicit Prettier config detected - using editor defaults
+- Tailwind CSS for styling with utility classes
+- 2-space indentation in TypeScript/TSX files
 
-- **Tool:** Not explicitly configured
-- **Defaults used:** 
-  - TypeScript: 2-space indentation, semicolons
-  - Python: PEP 8 (4-space indentation)
+**Linting:**
+- No explicit ESLint config detected
+- TypeScript strict mode enabled (`"strict": true` in tsconfig.json)
 
-### Linting
-
-- **Frontend:** Not configured (Next.js lint command available but not used)
-- **Backend:** Not configured
-
-### TypeScript Specific
-
-- **Strict Mode:** Enabled in `tsconfig.json`
-- **Module Resolution:** `bundler` mode
-- **Path Aliases:** `@/*` mapped to project root
-
-### Python Specific
-
-- **Framework:** FastAPI
-- **Settings:** Pydantic v2 with `pydantic-settings`
-- **Logging:** Python standard `logging` module
+**TypeScript Configuration:**
+- `tsconfig.json` with strict mode enabled
+- Path alias: `@/*` maps to `./` (frontend root)
+- Module resolution: `bundler` for Next.js 15
+- JSX: preserved for Next.js
 
 ## Import Organization
 
-### TypeScript/React
+**Order:**
+1. React/Next imports - `import { useState, useCallback } from 'react';`
+2. External libraries - `import { Sparkles, Loader2 } from 'lucide-react';`
+3. Internal hooks - `import { useNegotiationState } from '@/hooks/useNegotiationState';`
+4. Internal components - `import { NegotiationDashboard } from '@/components/negotiation/NegotiationDashboard';`
+5. Internal lib/utils - `import { NegotiationWebSocket } from '../lib/websocket';`
 
-From `frontend/app/layout.tsx`:
-```typescript
-import type { Metadata } from 'next'
-```
-
-Order pattern:
-1. Type imports
-2. React/Next.js imports
-3. External libraries
-4. Internal components/utilities
-
-### Python
-
-From `backend/app/main.py`:
-```python
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-import logging
-
-from app.config import settings
-```
-
-Order pattern:
-1. Standard library
-2. Third-party packages
-3. Local application imports
+**Path Aliases:**
+- Use `@/*` for frontend-relative imports - e.g., `@/hooks/useNegotiationState`
+- Use relative paths for sibling modules - e.g., `../lib/types`
 
 ## Error Handling
 
-### Python/FastAPI
+**Patterns:**
+- Validation functions return arrays of error objects
+- Error objects use `ValidationError` interface: `{ field: keyof State, message: string }`
+- Console logging for development debugging: `console.log()`, `console.warn()`, `console.error()`
+- Custom events for cross-component communication: `window.dispatchEvent(new CustomEvent(...))`
 
-**Pattern from** `backend/app/main.py`:
-- Use try/except blocks for async operations
-- Catch specific exceptions first
-- Log errors appropriately
-
-**HTTP Status Codes Used:**
-- 200: Success
-- 400: Bad Request
-- 404: Not Found
-- 500: Internal Server Error
-
-### TypeScript/React
-
-- Error boundaries for component-level errors
-- Try/catch for async operations
+**Validation Example:**
+```typescript
+const validateState = useCallback((stateToValidate: NegotiationState): ValidationError[] => {
+  const errors: ValidationError[] = [];
+  if (stateToValidate.target_price > stateToValidate.max_price && stateToValidate.max_price > 0) {
+    errors.push({
+      field: 'target_price',
+      message: 'Target price cannot exceed maximum price'
+    });
+  }
+  return errors;
+}, []);
+```
 
 ## Logging
 
-### Backend (Python)
-
-**Framework:** Python `logging` module
-
-From `backend/app/main.py`:
-```python
-import logging
-logging.basicConfig(level=settings.LOG_LEVEL)
-logger = logging.getLogger(__name__)
-```
+**Framework:** console (no dedicated logging library)
 
 **Patterns:**
-- Use appropriate log levels: DEBUG, INFO, WARNING, ERROR
-- Include context in log messages
-- Never log sensitive data
-
-### Frontend
-
-- Console logging for development
-- Not explicitly configured for production
+- Feature tagging in brackets: `console.log('[Integration] STATE_UPDATE received:', event.detail)`
+- Conditional warnings: `console.warn('[Integration] Validation errors:', validationErrors)`
+- Error logging with context: `console.error('Voice enrollment failed:', error)`
 
 ## Comments
 
-### When to Comment
+**When to Comment:**
+- JSDoc for exported functions/hooks explaining purpose and parameters
+- Inline comments for complex logic (e.g., "Keep only last 90 seconds")
+- TODO comments for temporary workarounds marked with "TEMPORARILY DISABLED"
 
-- Complex business logic
-- Non-obvious workarounds
-- API contracts
-- Configuration requirements
-
-### JSDoc/TSDoc
-
-- Recommended for public functions and components
-- Type definitions
-
-### Python Docstrings
-
-- Required for functions/classes
+**JSDoc Usage:**
+```typescript
+/**
+ * Hook for managing negotiation state in button-triggered advice system.
+ * 
+ * Features:
+ * - Tracks item, prices, market data, and transcript
+ * - Maintains 90-second rolling window for transcript
+ * - Extracts prices from transcript text
+ * 
+ * @returns State and update functions
+ */
+export function useNegotiationState() { }
+```
 
 ## Function Design
 
-### Size Guidelines
+**Size:** Keep functions focused and under 100 lines where possible
 
-- Maximum nesting: 3 levels
-- Maximum parameters: 5 (use objects for more)
-- Single responsibility
+**Parameters:**
+- Use explicit types for all parameters
+- Destructuring for object parameters in components
+- Optional parameters marked with `?` - e.g., `progress?: string | null`
 
-### Parameters
-
-**Python:**
-```python
-def function_name(param1: type, param2: type) -> return_type:
-    """Docstring."""
-    pass
-```
-
-**TypeScript:**
-```typescript
-function functionName(param1: type, param2: type): returnType {
-  // ...
-}
-```
-
-### Return Values
-
-- Always declare return types
-- Use Optional[T] for nullable returns in Python
-- Use T | null or undefined for TypeScript
+**Return Values:**
+- Hooks return object with named properties - e.g., `{ state, validationErrors, addTranscriptEntry }`
+- Components return JSX or null
 
 ## Module Design
 
-### Exports
+**Exports:**
+- Named exports for components and hooks
+- Default exports for page components (Next.js convention)
+- Interface exports for types
 
-**Frontend:**
-- Default exports for React pages/components
-- Named exports for utilities
+**Barrel Files:** Not detected (no `index.ts` barrel files)
 
-**Python:**
-- Explicit imports of required items
+## Component Patterns
 
-### Barrel Files
-
-- Not currently used
-
-## Configuration
-
-### Environment Variables
-
-**Python (Pydantic):**
-```python
-from pydantic_settings import BaseSettings
-
-class Config(BaseSettings):
-    GEMINI_API_KEY: str
-    GEMINI_MODEL: str = "default-model"
-    
-    class Config:
-        env_file = ".env"
-
-settings = Config()
-```
-
-### Path Aliases
-
-**Frontend:** `@/*` maps to project root
-
-## UI Component Conventions
-
-### TailwindCSS Usage
-
-From `tailwind.config.js`:
-```javascript
-module.exports = {
-  content: [
-    './app/**/*.{js,ts,jsx,tsx,mdx}',
-    './components/**/*.{js,ts,jsx,tsx,mdx}',
-    './lib/**/*.{js,ts,jsx,tsx,mdx}',
-    './hooks/**/*.{js,ts,jsx,tsx,mdx}',
-  ],
-  // ...
+**Props Interface:**
+```typescript
+interface ValidationErrorsProps {
+  errors: ValidationError[];
 }
 ```
 
-**Patterns:**
-- Use utility classes for styling
-- No inline styles
-- Responsive design with Tailwind breakpoints
+**Functional Components:**
+- Arrow functions with explicit type annotations
+- Destructured props in function signature
 
-## Security Conventions
-
-### Environment Variables (Never Commit)
-
-- `.env` files should not be committed
-- Use `.env.example` for template
-
-### API Key Handling
-
-```python
-# Environment variable
-import os
-API_KEY = os.getenv("GEMINI_API_KEY")
-if not API_KEY:
-    raise ValueError("GEMINI_API_KEY must be set")
-```
-
-### CORS Configuration
-
-From `backend/app/main.py`:
-```python
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-```
-
-## WebSocket Conventions
-
-### Backend
-
-Not yet implemented, but planned structure:
-```python
-from fastapi import WebSocket, WebSocketDisconnect
-
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    # Handle messages
-```
+**State Management:**
+- `useState` for local component state
+- `useReducer` for complex state logic (see `useNegotiation.ts`)
+- Custom hooks for reusable stateful logic
 
 ---
 
-*Convention analysis: 2026-03-07*
+*Convention analysis: 2026-03-10*

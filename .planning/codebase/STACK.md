@@ -1,112 +1,91 @@
 # Technology Stack
 
-**Analysis Date:** 2026-03-07
+**Analysis Date:** 2026-03-10
 
 ## Languages
 
 **Primary:**
-- Python 3.11 - Backend API (FastAPI)
-- TypeScript - Frontend (Next.js)
+- TypeScript 5.x - Frontend UI and client-side logic
+- Python 3.11 - Backend API and AI integration
 
 **Secondary:**
-- CSS - Styling (Tailwind CSS)
+- CSS - Styling via Tailwind CSS
 
 ## Runtime
 
 **Environment:**
-- Node.js 18+ (inferred from @types/node ^20.0.0)
-- Python 3.11
+- Node.js 20.x - Frontend development server (Next.js)
+- Python 3.11 - Backend runtime
 
 **Package Managers:**
-- npm - Frontend
-- pip - Backend
-- Lockfiles: `package-lock.json` (present)
+- npm (frontend) - `package-lock.json` present
+- pip (backend) - `requirements.txt`
 
 ## Frameworks
 
-**Core Backend:**
-- FastAPI 0.109.0+ - Web framework
-- Uvicorn 0.27.0+ - ASGI server
+**Frontend:**
+- Next.js 15.x - React framework with App Router
+- React 19.x - UI library
 
-**Core Frontend:**
-- Next.js 14.0.0 - React framework (App Router)
-- React 18.2.0 - UI library
+**Backend:**
+- FastAPI 0.109+ - REST API and WebSocket server
+- Uvicorn - ASGI server
 
 **Testing:**
-- Not detected
+- Vitest 4.x - Frontend testing framework
+- pytest - Backend testing
 
-**Build/Dev:**
-- Tailwind CSS 3.4.0 - Styling
-- PostCSS 8.4.32 - CSS processing
-- Autoprefixer 10.4.16 - Vendor prefixes
-- TypeScript 5.0.0 - Type safety
+**Styling:**
+- Tailwind CSS 3.4 - Utility-first CSS framework
+- PostCSS - CSS processing
 
 ## Key Dependencies
 
-**Critical (Backend):**
-- `fastapi` 0.109.0+ - Web framework
-- `uvicorn[standard]` 0.27.0+ - ASGI server with websocket support
-- `websockets` 12.0+ - WebSocket protocol
-- `google-genai` 1.0.0+ - Google Gemini API client
-- `pydantic` 2.0.0+ - Data validation
-- `pydantic-settings` 2.0.0+ - Configuration management
-- `python-dotenv` 1.0.0+ - Environment variable loading
-- `pillow` 10.0.0+ - Image processing
+**Frontend:**
+- `next` 15.x - Next.js framework
+- `react` 19.x - React library
+- `lucide-react` 0.470.x - Icon library
 
-**Critical (Frontend):**
-- `next` 14.0.0 - React framework with SSR/SSG
-- `react` 18.2.0 - Core React library
-- `react-dom` 18.2.0 - React DOM rendering
-- `lucide-react` 0.300.0 - Icon library
+**Backend:**
+- `fastapi` 0.109+ - Web framework
+- `uvicorn[standard]` 0.27+ - ASGI server
+- `google-genai` 1.0+ - Gemini Live API client
+- `websockets` 12.0+ - WebSocket support
+- `pydantic` 2.0+ - Data validation
+- `pydantic-settings` 2.0+ - Settings management
+- `python-dotenv` 1.0+ - Environment variable loading
 
-**Dev Dependencies (Frontend):**
-- `@types/node` 20.0.0+ - Node.js types
-- `@types/react` 18.2.0+ - React types
-- `@types/react-dom` 18.2.0+ - React DOM types
-- `autoprefixer` 10.4.16 - Vendor prefixes
-- `postcss` 8.4.32 - CSS processing
-- `tailwindcss` 3.4.0 - Utility CSS
-- `typescript` 5.0.0+ - Type safety
+**Development:**
+- `typescript` 5.x - Type safety
+- `vitest` 4.x - Testing
+- `tailwindcss` 3.4 - Styling
+- `autoprefixer` - CSS vendor prefixes
 
 ## Configuration
 
 **Environment:**
-- Python: `.env` file via `pydantic-settings`
-- Backend config: `backend/app/config.py` - `Config` class extending `BaseSettings`
+- `.env` files (backend) - Configuration via `python-dotenv`
+- Pydantic `BaseSettings` - Type-safe configuration management
+- Config file: `backend/app/config.py`
 
-**Key Config Settings (`backend/app/config.py`):**
-```python
-GEMINI_API_KEY: str
-GEMINI_MODEL: str = "gemini-2.5-flash-native-audio-preview-12-2025"
-GEMINI_MODEL_FALLBACK: str = "gemini-2.0-flash-live-preview-04-09"
-CORS_ORIGINS: list[str] = ["http://localhost:3000"]
-LOG_LEVEL: str = "INFO"
-SESSION_TTL_SECONDS: int = 3600
-```
-
-**Build Config:**
-- `frontend/tsconfig.json` - TypeScript configuration with Next.js plugin
-- Path alias: `@/*` maps to `./*`
+**Build:**
+- `frontend/next.config.js` - Next.js configuration
+- `frontend/tsconfig.json` - TypeScript configuration
 - `frontend/tailwind.config.js` - Tailwind CSS configuration
-
-**CORS:**
-- Configured via `CORS_ORIGINS` setting
-- Default allowed origin: `http://localhost:3000`
+- `frontend/postcss.config.js` - PostCSS configuration
 
 ## Platform Requirements
 
 **Development:**
-- Node.js 18+
-- Python 3.11
+- Node.js 20.x+
+- Python 3.11+
 - npm for frontend dependencies
-- pip for backend dependencies
 
 **Production:**
-- Docker for backend containerization
-- Backend: Python 3.11-slim image
-- Backend exposed on port 8080
-- Frontend on port 3000 (Next.js default)
+- Docker container (Python 3.11-slim based)
+- Exposed port: 8080 (backend)
+- CORS configured for localhost:3000 (dev)
 
 ---
 
-*Stack analysis: 2026-03-07*
+*Stack analysis: 2026-03-10*

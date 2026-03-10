@@ -1,154 +1,185 @@
 # Architecture
 
-**Analysis Date:** 2026-03-07
+**Analysis Date:** 2026-03-10
 
 ## Pattern Overview
 
-**Overall:** Minimal full-stack starter with Next.js frontend and FastAPI backend
+**Overall:** Client-Server with WebSocket Real-Time Communication
 
 **Key Characteristics:**
-- Separate frontend (Next.js 14 App Router) and backend (FastAPI Python)
-- REST API communication between frontend and backend
-- CORS configured to allow frontend dev server
-- Health check endpoints implemented
-- Google Gemini AI integration planned
+- **Backend**: FastAPI-based async Python server using WebSocket for real-time bidirectional communication
+- **Frontend**: Next.js 15 (React 19) with TypeScript, using WebSocket client for real-time AI interaction
+- **AI Integration**: Google Gemini Live API (Live 2.5 Flash with native audio) for real-time voice conversation
+- **State Machine**: Server-side state machine managing negotiation session lifecycle (IDLE → CONSENTED → ACTIVE → ENDING)
 
 ## Layers
 
-### Frontend (Next.js)
+### Backend Layers
 
-**Purpose:** React-based UI for negotiation assistance
-- **Location:** `frontend/app/`
-- **Contains:** Page components and layouts only
-- **Depends on:** Browser APIs, TailwindCSS
-- **Used by:** End users via browser
-- **Status:** Minimal starter - only landing page implemented
+**API Layer:**
+- Location: `backend/app/api/`
+- Contains: WebSocket router handling real-time connections
+- Depends on: Services layer, Models
+- Used by: Frontend WebSocket client
+- Key files:
+  - `backend/app/api/websocket.py` - WebSocket endpoint (`/ws`) handling message routing
 
-**Missing components:**
-- `components/negotiation/` - Not yet created
-- `components/ui/` - Not yet created  
-- `components/providers/` - Not yet created
-- `lib/` - Not yet created
-- `hooks/` - Not yet created
+**Services Layer:**
+- Location: `backend/app/services/`
+- Contains: Business logic for AI communication, negotiation engine, connection management
+- Depends on: Models, config
+- Used by: API layer
+- Key files:
+  - `backend/app/services/negotiation_engine.py` - State machine, message validation, routing
+  - `backend/app/services/gemini_client.py` - Gemini Live API client (audio, vision, function calls)
+  - `backend/app/services/connection_manager.py` - WebSocket connection tracking
+  - `backend/app/services/master_prompt.py` - System prompt for AI behavior
 
-### Backend API Layer
+**Models Layer:**
+- Location: `backend/app/models/`
+- Contains: Pydantic models for data validation and serialization
+- Depends on: None (pure data)
+- Used by: Services, API
+- Key files:
+  - `backend/app/models/negotiation.py` - NegotiationSession, NegotiationState enum
 
-**Purpose:** HTTP endpoints and request handling
-- **Location:** `backend/app/`
-- **Contains:** `main.py` (entry point), `config.py` (settings)
-- **Depends on:** FastAPI, Pydantic
-- **Used by:** Frontend HTTP clients
+**Configuration:**
+- Location: `backend/app/config.py`
+- Contains: Settings using pydantic-settings (env var loading)
+- Provides: API keys, model names, CORS settings, logging config
 
-**Implemented:**
-- FastAPI app initialization in `backend/app/main.py`
-- CORS middleware configuration
-- Health check endpoints (`/api/health`, `/health`)
-- Configuration via Pydantic Settings
+### Frontend Layers
 
-**Missing:**
-- `backend/app/api/` directory with route handlers
-- `backend/app/services/` with business logic
-- `backend/app/models/` with data schemas
-- WebSocket endpoint
+**Page Layer:**
+- Location: `frontend/app/`
+- Contains: Next.js pages (React components)
+- Entry point: `frontend/app/page.tsx` - Main negotiation dashboard
+
+**Component Layer:**
+- Location: `frontend/components/`
+- Contains: React UI components organized by feature
+- Depends on: Hooks layer
+- Key directories:
+  - `frontend/components/negotiation/` - Negotiation UI components
+  - `frontend/components/enrollment/` - Voice enrollment screen
+
+**Hook Layer:**
+- Location: `frontend/hooks/`
+- Contains: Custom React hooks for state and WebSocket management
+- Depends on: Lib layer
+- Key files:
+  - `frontend/hooks/useNegotiation.ts` - Main WebSocket connection and audio management
+  - `frontend/hooks/useNegotiationState.ts` - State management for negotiation data
+  - `frontend/hooks/useAskAI.ts` - Button-triggered AI advice
+  - `frontend/hooks/useAudioWithSpeakerID.ts` - Audio capture with speaker identification
+
+**Lib Layer:**
+- Location: `frontend/lib/`
+- Contains: Core utilities, WebSocket client, audio processing
+- Key files:
+  - `frontend/lib/websocket.ts` - WebSocket client implementation
+  - `frontend/lib/audio-worklet-manager.ts` - Audio capture/playback using Web Audio API
+  - `frontend/lib/voice-fingerprint.ts` - Voice fingerprinting for speaker identification
+  - `frontend/lib/types.ts` - TypeScript type definitions
 
 ## Data Flow
 
-**Current API Communication:**
+**Negotiation Session Flow:**
 
-1. Frontend (browser) → HTTP GET to `localhost:3000` (Next.js)
-2. Backend runs on `localhost:8080` (FastAPI)
-3. Health check at `/health` returns `{"status": "healthy"}`
+1. **Connection**: Frontend connects to `ws://host:8000/ws`
+   - Backend creates NegotiationSession with UUID
+   - Session starts in IDLE state
 
-**Planned Flow (not implemented):**
-```
-Client → WebSocket → Backend → Gemini Live API → Response → Client UI
-```
+2. **Consent**: Frontend sends `PRIVACY_CONSENT_GRANTED`
+   - Backend transitions to CONSENTED state
+
+3. **Start**: Frontend sends `START_NEGOTIATION` with context
+   - Backend opens Gemini Live session
+   - Transitions to ACTIVE state
+   - Starts async tasks: receive_responses(), monitor_session_lifetime()
+
+4. **Real-Time Communication** (ACTIVE state):
+   - **Audio**: Frontend captures PCM audio → sends via WebSocket binary → backend → Gemini Live API
+   - **Vision**: Frontend sends base64 frames → backend → Gemini Live API
+   - **AI Response**: Gemini Live → backend → WebSocket → Frontend audio playback + transcript
+
+5. **Ask Advice**: Frontend sends `ASK_ADVICE` → backend → triggers Gemini response → streams to frontend
+
+6. **End**: Frontend sends `END_NEGOTIATION`
+   - Backend closes Gemini session
+   - Sends outcome summary
+   - Transitions to IDLE
+
+**State Updates Flow:**
+- Gemini extracts negotiation state (item, prices) from transcript
+- Backend receives via `<state_update>` XML tags in AI response
+- Forwarded to frontend via `STATE_UPDATE` message
 
 ## Key Abstractions
 
-**Frontend Configuration:**
-- Purpose: Next.js configuration and environment setup
-- Files: `frontend/next.config.js`, `frontend/tsconfig.json`, `frontend/tailwind.config.js`
-- Pattern: Standard Next.js 14 App Router config with path alias `@/*`
+**NegotiationSession:**
+- Purpose: Server-side session state container
+- Examples: `backend/app/models/negotiation.py`
+- Pattern: Pydantic BaseModel with runtime-only fields (live_session)
 
-**Backend Configuration:**
-- Purpose: Centralized settings using Pydantic
-- Files: `backend/app/config.py`
-- Pattern: Pydantic Settings with environment variable support
+**NegotiationEngine:**
+- Purpose: Static methods for message handling and state transitions
+- Examples: `backend/app/services/negotiation_engine.py`
+- Pattern: Static class with async handlers for each message type
 
-```python
-# backend/app/config.py
-class Config(BaseSettings):
-    GEMINI_API_KEY: str
-    GEMINI_MODEL: str = "gemini-2.5-flash-native-audio-preview-12-2025"
-    GEMINI_MODEL_FALLBACK: str = "gemini-2.0-flash-live-preview-04-09"
-    CORS_ORIGINS: list[str] = ["http://localhost:3000"]
-    LOG_LEVEL: str = "INFO"
-    SESSION_TTL_SECONDS: int = 3600
-```
+**GeminiClient:**
+- Purpose: Wrapper for Google Gemini Live API
+- Examples: `backend/app/services/gemini_client.py`
+- Pattern: Static methods for session management, audio/video sending, response receiving
+
+**NegotiationWebSocket:**
+- Purpose: Frontend WebSocket client abstraction
+- Examples: `frontend/lib/websocket.ts`
+- Pattern: Class with callbacks for message handling
+
+**AudioWorkletManager:**
+- Purpose: Frontend audio capture and playback
+- Examples: `frontend/lib/audio-worklet-manager.ts`
+- Pattern: Web Audio API + AudioWorklet for low-latency processing
 
 ## Entry Points
 
-### Frontend Entry
+**Backend Entry:**
+- Location: `backend/app/main.py`
+- Triggers: uvicorn/fastapi server startup
+- Responsibilities: FastAPI app creation, CORS middleware, health endpoints, router inclusion
 
-- **Location:** `frontend/app/page.tsx`
-- **Triggers:** Browser navigates to `/`
-- **Responsibilities:** Render main page with "AI Negotiation Copilot" heading
-- **Current implementation:** Minimal stub
+**Frontend Entry:**
+- Location: `frontend/app/page.tsx`
+- Triggers: User navigates to root URL
+- Responsibilities: Main UI rendering, WebSocket connection, audio management
 
-```tsx
-// frontend/app/page.tsx
-export default function Home() {
-  return (
-    <main>
-      <h1>AI Negotiation Copilot</h1>
-    </main>
-  )
-}
-```
-
-### Frontend Layout
-
-- **Location:** `frontend/app/layout.tsx`
-- **Responsibilities:** HTML shell, metadata, global styles
-
-### Backend Entry
-
-- **Location:** `backend/app/main.py`
-- **Triggers:** `uvicorn app.main:app --host 0.0.0.0 --port 8080`
-- **Responsibilities:** Initialize FastAPI app, configure CORS, health endpoints
-- **Configured in:** `backend/Dockerfile`
+**WebSocket Endpoint:**
+- Location: `backend/app/api/websocket.py`
+- Triggers: Frontend connects to `/ws`
+- Responsibilities: Session creation, message loop, connection management
 
 ## Error Handling
 
-**Strategy:** Not fully implemented - placeholder code only
+**Strategy:** Graceful degradation with error messages sent via WebSocket
 
 **Patterns:**
-- Backend: Returns JSON error responses via FastAPI
-- Frontend: Not yet implemented (minimal stub)
+- Invalid JSON: Send ERROR message, continue connection
+- Invalid state transitions: Send ERROR message, reject operation
+- Gemini unavailable: Send GEMINI_UNAVAILABLE error, transition to IDLE
+- Audio format errors: Log warning, skip chunk
+- WebSocket disconnect: Clean up session, log info
 
 ## Cross-Cutting Concerns
 
-**Logging:** Python standard logging in backend
-```python
-logging.basicConfig(level=settings.LOG_LEVEL)
-logger = logging.getLogger(__name__)
-```
+**Logging:** Python standard logging (INFO level by default, configurable via LOG_LEVEL)
 
-**Validation:** Pydantic models for config validation
-**Authentication:** Not implemented - placeholder for future
-**CORS:** Configured to allow `http://localhost:3000`
+**Validation:** Pydantic models for request/response validation
 
-```python
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-```
+**Authentication:** Not implemented (privacy consent only)
+
+**Configuration:** pydantic-settings loading from `.env` file
 
 ---
 
-*Architecture analysis: 2026-03-07*
+*Architecture analysis: 2026-03-10*

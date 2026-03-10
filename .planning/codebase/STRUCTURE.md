@@ -1,244 +1,195 @@
 # Codebase Structure
 
-**Analysis Date:** 2026-03-07
+**Analysis Date:** 2026-03-10
 
 ## Directory Layout
 
 ```
-ai-negotiation-copilot/
-├── frontend/                    # Next.js application (minimal starter)
-│   ├── app/                    # Next.js App Router pages
-│   │   ├── page.tsx           # Landing page (minimal stub)
-│   │   └── layout.tsx         # Root layout with metadata
-│   ├── package.json
-│   ├── tsconfig.json
-│   ├── next.config.js
-│   └── tailwind.config.js
-│
-├── backend/                     # FastAPI application (minimal starter)
-│   ├── app/                   # Main application code
-│   │   ├── main.py            # FastAPI app entry point
-│   │   └── config.py          # Configuration (Pydantic Settings)
-│   ├── requirements.txt
-│   ├── Dockerfile
-│   └── .env.example
-│
-├── docs/                       # Documentation
-├── scripts/                    # Utility scripts
-├── infrastructure/            # Deployment configs
-└── README.md
+project-root/
+├── .agents/               # GSD agent skills and workflows
+├── .opencode/            # OpenCode configuration and dependencies
+├── .vscode/              # VSCode settings
+├── backend/              # Python FastAPI backend
+│   ├── app/
+│   │   ├── api/          # API route handlers
+│   │   ├── models/       # Pydantic data models
+│   │   ├── services/     # Business logic
+│   │   ├── config.py     # Configuration/settings
+│   │   └── main.py       # FastAPI app entry point
+│   ├── tests/            # Backend tests
+│   ├── requirements.txt  # Python dependencies
+│   └── Dockerfile        # Container configuration
+├── frontend/             # Next.js React frontend
+│   ├── app/              # Next.js app router pages
+│   ├── components/       # React UI components
+│   │   ├── negotiation/ # Negotiation dashboard components
+│   │   └── enrollment/   # Voice enrollment components
+│   ├── hooks/            # Custom React hooks
+│   ├── lib/              # Core utilities and clients
+│   ├── public/           # Static assets
+│   │   └── worklets/     # Web Audio worklets
+│   ├── tests/            # Frontend tests
+│   ├── package.json      # Node dependencies
+│   └── tsconfig.json     # TypeScript config
+├── infrastructure/       # Deployment/infrastructure config
+├── scripts/              # Utility scripts
+├── docs/                 # Documentation
+└── .planning/            # GSD planning outputs
+    └── codebase/         # Codebase analysis documents
 ```
 
 ## Directory Purposes
 
-### Frontend Directory
+### Backend (`backend/`)
 
-**`frontend/app/`**
-- Purpose: Next.js App Router pages and layouts
-- Contains: `layout.tsx`, `page.tsx`
-- Key files: 
-  - `frontend/app/page.tsx` - Landing page stub (7 lines)
-  - `frontend/app/layout.tsx` - Root layout with metadata
+**`backend/app/api/`:**
+- Purpose: FastAPI route handlers
+- Contains: WebSocket endpoint definition
+- Key files: `backend/app/api/websocket.py`
 
-**NOT YET CREATED (documented but not implemented):**
-- `frontend/components/negotiation/` - Domain-specific components
-- `frontend/components/ui/` - Reusable UI primitives
-- `frontend/components/providers/` - React Context providers
-- `frontend/lib/` - Core utilities (websocket, media-stream, types)
-- `frontend/hooks/` - Custom React hooks
-- `frontend/public/worklets/` - AudioWorklet files
-- `frontend/app/negotiate/page.tsx` - Main negotiation interface
-- `frontend/app/api/health/route.ts` - Frontend health check proxy
+**`backend/app/models/`:**
+- Purpose: Pydantic data models
+- Contains: Session, state, message type definitions
+- Key files: `backend/app/models/negotiation.py`, `backend/app/models/messages.py`
 
-### Backend Directory
-
-**`backend/app/`**
-- Purpose: Main FastAPI application code
-- Contains: `main.py`, `config.py` (minimal)
+**`backend/app/services/`:**
+- Purpose: Business logic and external API clients
+- Contains: Negotiation engine, Gemini client, connection manager
 - Key files:
-  - `backend/app/main.py` - FastAPI app initialization (35 lines)
-  - `backend/app/config.py` - Settings configuration (14 lines)
+  - `backend/app/services/negotiation_engine.py`
+  - `backend/app/services/gemini_client.py`
+  - `backend/app/services/connection_manager.py`
+  - `backend/app/services/master_prompt.py`
 
-**NOT YET CREATED (documented but not implemented):**
-- `backend/app/api/` - Route handlers (health.py, websocket.py)
-- `backend/app/services/` - Business logic (gemini_client, negotiation_engine, connection_manager)
-- `backend/app/models/` - Pydantic data models
-- `backend/app/utils/` - Helper utilities
-- `backend/app/middleware/` - Middleware components
-- `backend/tests/` - Backend tests
+**`backend/tests/`:**
+- Purpose: Python unit tests
+- Contains: Test modules
+
+### Frontend (`frontend/`)
+
+**`frontend/app/`:**
+- Purpose: Next.js app router pages
+- Contains: React page components
+- Key files: `frontend/app/page.tsx`, `frontend/app/negotiate/page.tsx`, `frontend/app/layout.tsx`
+
+**`frontend/components/negotiation/`:**
+- Purpose: Negotiation dashboard UI components
+- Contains: Dashboard, control bar, transcript panel, strategy panel, etc.
+- Key files: `NegotiationDashboard.tsx`, `ControlBar.tsx`, `TranscriptPanel.tsx`, `StrategyPanel.tsx`
+
+**`frontend/components/enrollment/`:**
+- Purpose: Voice enrollment UI
+- Contains: Voice enrollment screen component
+
+**`frontend/hooks/`:**
+- Purpose: Custom React hooks for state and WebSocket management
+- Key files: `useNegotiation.ts`, `useNegotiationState.ts`, `useAskAI.ts`, `useAudioWithSpeakerID.ts`
+
+**`frontend/lib/`:**
+- Purpose: Core utilities and clients
+- Contains: WebSocket client, audio processing, types
+- Key files: `websocket.ts`, `audio-worklet-manager.ts`, `voice-fingerprint.ts`, `types.ts`
+
+**`frontend/public/worklets/`:**
+- Purpose: Web Audio API worklet processors
+- Contains: `pcm-processor.js`, `pcm-playback-processor.js`
 
 ## Key File Locations
 
 ### Entry Points
 
 - `backend/app/main.py` - FastAPI application initialization
-- `frontend/app/page.tsx` - Next.js landing page
-- `backend/Dockerfile` - Container definition (runs uvicorn on port 8080)
+- `frontend/app/page.tsx` - Main frontend page
 
 ### Configuration
 
-- `backend/app/config.py` - Settings using Pydantic
-- `backend/.env.example` - Environment variable template
-- `frontend/package.json` - NPM dependencies
-- `frontend/tsconfig.json` - TypeScript config with path alias `@/*`
+- `backend/app/config.py` - Backend settings (API keys, model config)
+- `frontend/tsconfig.json` - TypeScript configuration
+- `frontend/next.config.js` - Next.js configuration
+- `frontend/tailwind.config.js` - Tailwind CSS configuration
 
-## Current Source Files
+### Core Logic
 
-### Frontend (`frontend/app/`)
+- `backend/app/services/negotiation_engine.py` - Session state machine
+- `backend/app/services/gemini_client.py` - Gemini Live API integration
+- `frontend/hooks/useNegotiation.ts` - WebSocket and audio management
+- `frontend/lib/websocket.ts` - WebSocket client class
 
-```typescript
-// page.tsx - 7 lines
-export default function Home() {
-  return (
-    <main>
-      <h1>AI Negotiation Copilot</h1>
-    </main>
-  )
-}
+### Types
 
-// layout.tsx - 18 lines
-import type { Metadata } from 'next'
-export const metadata: Metadata = {
-  title: 'AI Negotiation Copilot',
-  description: 'Multimodal real-time negotiation assistant',
-}
-export default function RootLayout({ children }: { children: React.ReactNode }) {
-  return (
-    <html lang="en">
-      <body>{children}</body>
-    </html>
-  )
-}
-```
-
-### Backend (`backend/app/`)
-
-```python
-# main.py - 35 lines
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-import logging
-from app.config import settings
-
-logging.basicConfig(level=settings.LOG_LEVEL)
-logger = logging.getLogger(__name__)
-
-app = FastAPI(title="AI Negotiation Copilot", version="1.0.0")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-@app.on_event("startup")
-async def startup_event():
-    logger.info(f"Starting AI Negotiation Copilot with primary model: {settings.GEMINI_MODEL}")
-
-@app.get("/api/health")
-async def health_check():
-    return {"status": "healthy"}
-
-@app.get("/health")
-async def health_check_root():
-    return {"status": "healthy"}
-
-# Placeholder for WebSocket route
-# @app.websocket("/ws")
-# async def websocket_endpoint(websocket: WebSocket):
-#     pass
-```
-
-```python
-# config.py - 14 lines
-from pydantic_settings import BaseSettings
-
-class Config(BaseSettings):
-    GEMINI_API_KEY: str
-    GEMINI_MODEL: str = "gemini-2.5-flash-native-audio-preview-12-2025"
-    GEMINI_MODEL_FALLBACK: str = "gemini-2.0-flash-live-preview-04-09"
-    CORS_ORIGINS: list[str] = ["http://localhost:3000"]
-    LOG_LEVEL: str = "INFO"
-    SESSION_TTL_SECONDS: int = 360 Config:
-        env0
-
-    class_file = ".env"
-
-settings = Config()
-```
-
-## Dependencies
-
-### Frontend (package.json)
-
-```json
-{
-  "dependencies": {
-    "next": "^14.0.0",
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
-    "lucide-react": "^0.300.0"
-  },
-  "devDependencies": {
-    "@types/node": "^20.0.0",
-    "@types/react": "^18.2.0",
-    "@types/react-dom": "^18.2.0",
-    "autoprefixer": "^10.4.16",
-    "postcss": "^8.4.32",
-    "tailwindcss": "^3.4.0",
-    "typescript": "^5.0.0"
-  }
-}
-```
-
-### Backend (requirements.txt)
-
-```
-fastapi>=0.109.0
-uvicorn[standard]>=0.27.0
-websockets>=12.0
-google-genai>=1.0.0
-pydantic>=2.0.0
-pydantic-settings>=2.0.0
-python-dotenv>=1.0.0
-pillow>=10.0.0
-```
+- `frontend/lib/types.ts` - TypeScript type definitions
+- `backend/app/models/negotiation.py` - Python session models
 
 ## Naming Conventions
 
 ### Files
 
-- **TypeScript/React:** PascalCase for components (`page.tsx`), camelCase for utilities
-- **Python:** snake_case for modules, PascalCase for classes
-- **Configuration:** camelCase (JS) or snake_case (Python) consistent with framework
+**Python:**
+- snake_case: `negotiation_engine.py`, `gemini_client.py`
+
+**TypeScript/React:**
+- PascalCase for components: `NegotiationDashboard.tsx`, `ControlBar.tsx`
+- camelCase for hooks: `useNegotiation.ts`, `useNegotiationState.ts`
+- camelCase for utilities: `websocket.ts`, `audioWorkletManager.ts`
 
 ### Directories
 
-- **Frontend:** lowercase (`app/`, `components/`, `lib/`, `hooks/`)
-- **Backend:** lowercase (`app/`, `services/`, `models/`, `utils/`)
+- snake_case for Python: `backend/app/api/`, `backend/app/services/`
+- kebab-case or camelCase for frontend: `components/negotiation/`, `hooks/`
+
+### Code
+
+- PascalCase for classes: `NegotiationSession`, `GeminiClient`, `NegotiationWebSocket`
+- camelCase for functions/variables: `sendAudioChunk`, `handleStart`
+- SCREAMING_SNAKE_CASE for constants: `SESSION_HARD_LIMIT_SECONDS`
 
 ## Where to Add New Code
 
-### New Feature (Frontend)
+### New Backend Feature
 
-- Pages: `frontend/app/` (App Router)
-- Components: Create `frontend/components/` directory
-- Hooks: Create `frontend/hooks/` directory
-- Utilities: Create `frontend/lib/` directory
+- API routes: `backend/app/api/`
+- Business logic: `backend/app/services/`
+- Models: `backend/app/models/`
 
-### New Service (Backend)
+### New Frontend Feature
 
-- Routes: Create `backend/app/api/` directory
-- Business logic: Create `backend/app/services/` directory
-- Data models: Create `backend/app/models/` directory
+- Page: `frontend/app/`
+- Component: `frontend/components/negotiation/` or `frontend/components/enrollment/`
+- Hook: `frontend/lib/` (if utility) or `frontend/hooks/` (if React state)
+- Types: `frontend/lib/types.ts`
 
-### New Configuration
+### New Service Integration
 
-- Backend settings: `backend/app/config.py`
-- Environment variables: `backend/.env` (never commit)
+- Backend service: `backend/app/services/`
+- Frontend library: `frontend/lib/`
+
+### Tests
+
+- Backend tests: `backend/tests/`
+- Frontend tests: `frontend/tests/` or co-located with `.test.ts/.tsx`
+
+## Special Directories
+
+**`.planning/codebase/`:**
+- Purpose: GSD codebase analysis documents
+- Generated: Yes (by codebase mapper)
+- Committed: Yes
+
+**`frontend/public/worklets/`:**
+- Purpose: Web Audio API worklet JavaScript files
+- Generated: No
+- Committed: Yes
+
+**`backend/venv/`:**
+- Purpose: Python virtual environment
+- Generated: Yes (by virtualenv/venv)
+- Committed: No (should be in .gitignore)
+
+**`frontend/node_modules/`:**
+- Purpose: Node.js dependencies
+- Generated: Yes (by npm install)
+- Committed: No
 
 ---
 
-*Structure analysis: 2026-03-07*
+*Structure analysis: 2026-03-10*

@@ -1,346 +1,261 @@
 # Testing Patterns
 
-**Analysis Date:** 2026-03-07
+**Analysis Date:** 2026-03-10
 
 ## Test Framework
 
-### Current State
+**Runner:**
+- Vitest 4.0.18
+- Config: `frontend/vitest.config.ts`
 
-**No test frameworks are currently installed or configured.**
+**Assertion Library:**
+- Vitest built-in (`expect`)
 
-Both frontend and backend projects need testing infrastructure to be set up.
+**Property-Based Testing:**
+- fast-check 4.5.3 for property-based tests
+- Default 100 iterations per property test
 
-### Backend (Python) - To Be Configured
-
-**Recommended:**
-- **Framework:** pytest
-- **Async Support:** pytest-asyncio
-- **HTTP Testing:** httpx (for FastAPI testing)
-
-**Installation would be:**
+**Run Commands:**
 ```bash
-pip install pytest pytest-asyncio httpx
-```
-
-**Run Commands (when configured):**
-```bash
-# Run all tests
-pytest
-
-# Run with coverage
-pytest --cov=app --cov-report=html
-
-# Run specific test file
-pytest tests/test_main.py
-
-# Run with verbose output
-pytest -v
-```
-
-### Frontend (TypeScript/React) - To Be Configured
-
-**Recommended:**
-- **Framework:** Jest (comes with Next.js) or Vitest
-- **Testing Library:** @testing-library/react
-- **E2E (future):** Playwright or Cypress
-
-**Installation would be:**
-```bash
-npm install --save-dev @testing-library/react @testing-library/user-event
-npm install --save-dev jest @types/jest ts-jest
-# OR use Vitest
-npm install --save-dev vitest @testing-library/react jsdom
-```
-
-**Run Commands (when configured):**
-```bash
-# Run all tests
-npm test
-
-# Watch mode
-npm test -- --watch
-
-# Coverage
-npm test -- --coverage
+npm run test              # Run all tests (vitest --run)
+npm run test:watch       # Watch mode (vitest)
+npm run test:ui          # UI mode (vitest --ui)
+npm run test:coverage    # Coverage (vitest --coverage)
 ```
 
 ## Test File Organization
 
-### Recommended Structure
+**Location:**
+- Co-located with source files
+- Test files in same directory as implementation
 
-**Backend:**
-```
-backend/
-├── app/
-│   ├── __init__.py
-│   ├── main.py
-│   └── config.py
-└── tests/
-    ├── __init__.py
-    ├── test_main.py
-    ├── test_config.py
-    ├── conftest.py          # Shared fixtures
-    └── services/
-        └── test_gemini_client.py
-```
+**Naming:**
+- `.test.ts` for TypeScript test files
+- `.test.tsx` for React component tests
+- Example files use `.example.tsx` suffix (e.g., `ValidationErrors.example.tsx`)
 
-**Frontend:**
+**Structure:**
 ```
 frontend/
-├── app/
-│   ├── page.tsx
-│   └── layout.tsx
-└── components/
-    └── __tests__/
-        └── ComponentName.test.tsx
+├── hooks/
+│   ├── useNegotiationState.ts
+│   └── useNegotiationState.test.ts
+├── components/
+│   └── negotiation/
+│       ├── ValidationErrors.tsx
+│       └── ValidationErrors.test.tsx
+└── tests/
+    ├── setup.ts
+    └── example.test.ts
 ```
-
-### Naming
-
-- `test_*.py` for Python (pytest convention)
-- `*.test.ts` or `*.test.tsx` for TypeScript
 
 ## Test Structure
 
-### Python (pytest)
-
-```python
-import pytest
-from unittest.mock import AsyncMock, MagicMock
-from httpx import AsyncClient
-
-from app.main import app
-from app.config import Config
-
-
-class TestMain:
-    """Test suite for main application."""
-
-    @pytest.fixture
-    def mock_settings(self):
-        """Mock settings for testing."""
-        return Config(
-            GEMINI_API_KEY="test-key",
-            GEMINI_MODEL="test-model",
-            CORS_ORIGINS=["http://localhost:3000"],
-            LOG_LEVEL="INFO"
-        )
-
-    @pytest.mark.asyncio
-    async def test_health_check(self, mock_settings):
-        """Test health endpoint returns healthy status."""
-        async with AsyncClient(app=app, base_url="http://test") as client:
-            response = await client.get("/health")
-            
-            assert response.status_code == 200
-            assert response.json() == {"status": "healthy"}
-```
-
-### TypeScript (Jest)
-
+**Suite Organization:**
 ```typescript
-import { render, screen } from '@testing-library/react';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 
-describe('Home Page', () => {
-  it('renders the page title', () => {
-    // This is a placeholder - actual page content will need testing
-    expect(true).toBe(true);
+describe('ComponentName', () => {
+  beforeEach(() => {
+    // Setup before each test
+    vi.spyOn(Date, 'now').mockReturnValue(mockDate);
+  });
+
+  describe('feature group', () => {
+    /**
+     * Test: Description
+     * Validates: Requirement or feature being tested
+     */
+    it('should do something specific', () => {
+      // Arrange
+      const input = 'test value';
+      
+      // Act
+      const result = processInput(input);
+      
+      // Assert
+      expect(result).toBe('expected');
+    });
   });
 });
 ```
 
+**Patterns:**
+
+1. **Setup/teardown**: `beforeEach` for resetting state and mocking
+2. **Nested describe**: Group related tests by feature
+3. **JSDoc comments**: Document what each test validates
+4. **Requirement references**: Include requirement numbers in comments
+
 ## Mocking
 
-### Framework Recommendations
+**Framework:** Vitest built-in (`vi`)
 
-**Python:**
-- `unittest.mock` (MagicMock, AsyncMock)
-- `pytest-mock` for enhanced fixture
-
-**TypeScript:**
-- `jest.fn()` for functions
-- `jest.mock()` for modules
-
-### Python Mocking Patterns
-
-```python
-from unittest.mock import AsyncMock, MagicMock, patch
-import pytest
-
-# Mock async function
-@pytest.mark.asyncio
-async def test_example():
-    mock_function = AsyncMock(return_value="result")
-    result = await mock_function()
-    assert result == "result"
-
-# Mock external dependency
-def test_external_api():
-    with patch('module.function') as mock_func:
-        mock_func.return_value = "mocked"
-        # test code
-```
-
-### TypeScript Mocking Patterns
+**Patterns:**
 
 ```typescript
-// Mock function
-const mockFn = jest.fn().mockResolvedValue('result');
+// Spy on Date.now()
+vi.spyOn(Date, 'now').mockReturnValue(mockDate);
 
-// Mock module
-jest.mock('@/lib/example', () => ({
-  exampleFunction: jest.fn(),
-}));
+// Mock implementation
+vi.spyOn(obj, 'method').mockImplementation(() => 'mocked');
 
-// Mock React component
-jest.mock('./Component', () => ({
-  Component: () => <div>Mocked</div>,
-}));
+// Restore after test
+vi.restoreAllMocks();
 ```
+
+**What to Mock:**
+- Time-dependent functions (`Date.now()`)
+- Browser APIs (when running in node environment)
+- External services
+
+**What NOT to Mock:**
+- Internal helper functions that are the test subject
+- Simple data transformations
 
 ## Fixtures and Factories
 
-### Python Fixtures
+**Test Data:**
+```typescript
+// Inline fixtures for simple tests
+const initialState: NegotiationState = {
+  item: '',
+  seller_price: null,
+  target_price: 0,
+  max_price: 0,
+  market_data: null,
+  transcript: []
+};
 
-```python
-# backend/tests/conftest.py
-import pytest
-
-@pytest.fixture
-def test_app():
-    """Create test FastAPI app."""
-    from app.main import app
-    return app
-
-@pytest.fixture
-def sample_config():
-    """Sample configuration for testing."""
-    return {
-        "GEMINI_API_KEY": "test-key",
-        "GEMINI_MODEL": "test-model",
-        "CORS_ORIGINS": ["http://localhost:3000"],
-    }
+// Test-specific data
+const mockTranscript = [
+  { speaker: 'USER', text: 'Old message', timestamp: mockDate - 91000 },
+  { speaker: 'USER', text: 'Recent message', timestamp: mockDate - 30000 }
+];
 ```
 
-### TypeScript Factories
+**Location:**
+- Inline in test files for simplicity
+- Shared utilities in `frontend/tests/setup.ts`
+
+## Setup File
+
+**File:** `frontend/tests/setup.ts`
 
 ```typescript
-// Simple factory pattern
-const createMockConfig = (overrides = {}) => ({
-  apiKey: 'test-key',
-  model: 'gemini-2.0-flash',
-  ...overrides,
-});
+/**
+ * Test setup file for Vitest
+ * 
+ * This file is automatically loaded before running tests.
+ * Configure global test utilities and mocks here.
+ */
+
+import fc from 'fast-check';
+
+export const DEFAULT_NUM_RUNS = 100;
+export { fc };
 ```
 
 ## Coverage
 
-### Recommendations
+**Requirements:** Not explicitly enforced
 
-- Minimum 70% line coverage
-- Critical paths should have higher coverage:
-  - API endpoints
-  - WebSocket message handling
-  - Configuration validation
-  - Error handling paths
-
-### View Coverage
-
-**Backend:**
+**View Coverage:**
 ```bash
-pytest --cov=app --cov-report=term-missing
+npm run test:coverage
 ```
 
-**Frontend:**
-```bash
-npm test -- --coverage
+**Config (vitest.config.ts):**
+```typescript
+coverage: {
+  provider: 'v8',
+  reporter: ['text', 'json', 'html'],
+  exclude: [
+    'node_modules/',
+    '.next/',
+    'coverage/',
+    '**/*.config.{js,ts}',
+    '**/*.d.ts',
+  ],
+}
 ```
 
 ## Test Types
 
-### Unit Tests
+**Unit Tests:**
+- Test individual functions and hooks
+- Test state management logic
+- Test price extraction utilities
+- Run in Node environment
 
-**Scope:** Individual functions, classes in isolation
-**Approach:** Mock all external dependencies
+**Component Tests:**
+- Currently testing component interfaces and logic
+- Full DOM rendering tests require `@testing-library/react` (not installed)
+- Test props interfaces, error structures, rendering conditions
 
-### Integration Tests
-
-**Scope:** Multiple units working together
-**Approach:** Use real implementations, mock external services
-
-**Backend Example:**
-```python
-@pytest.mark.asyncio
-async def test_health_endpoint_integration():
-    """Test health endpoint with real app."""
-    async with AsyncClient(app=app, base_url="http://test") as client:
-        response = await client.get("/health")
-        
-        assert response.status_code == 200
+**Property-Based Tests:**
+- Use fast-check with `fc.assert()` and `fc.property()`
+- Example from `example.test.ts`:
+```typescript
+it('should run property-based tests with fast-check', () => {
+  fc.assert(
+    fc.property(
+      fc.integer(),
+      (num) => {
+        expect(num + 0).toBe(num);
+      }
+    ),
+    { numRuns: DEFAULT_NUM_RUNS }
+  );
+});
 ```
-
-### E2E Tests
-
-- Not currently set up
-- Recommendation: Playwright or Cypress for future
 
 ## Common Patterns
 
-### Async Testing (Python)
-
-```python
-@pytest.mark.asyncio
-async def test_async_operation():
-    """Test async function."""
-    result = await async_function()
-    assert result is not None
+**Async Testing:**
+```typescript
+// Not currently used - synchronous state updates
+// For async operations, would use async/await with expect
 ```
 
-### Error Testing (Python)
+**Error Testing:**
+```typescript
+it('should handle error case', () => {
+  const state: NegotiationState = {
+    item: 'Test Item',
+    seller_price: null,
+    target_price: 60000,  // > max_price
+    max_price: 50000,
+    market_data: null,
+    transcript: []
+  };
 
-```python
-@pytest.mark.asyncio
-async def test_handles_error():
-    """Test error handling."""
-    with pytest.raises(ValueError):
-        await invalid_operation()
+  const isValid = state.target_price <= state.max_price;
+  expect(isValid).toBe(false);
+});
 ```
 
-### WebSocket Testing (Python - Future)
+**Type Testing:**
+```typescript
+// Test type structures by creating instances
+const error: ValidationError = {
+  field: 'target_price',
+  message: 'Target price cannot exceed maximum price'
+};
 
-```python
-@pytest.mark.asyncio
-async def test_websocket_connection():
-    """Test WebSocket endpoint."""
-    async with AsyncClient(app=app, base_url="http://test") as client:
-        async with client.websocket_connect("/ws") as ws:
-            # Test connection
-            pass
+expect(error).toHaveProperty('field');
+expect(error).toHaveProperty('message');
 ```
 
-## Current Test Gaps
+## Environment
 
-### Missing Test Infrastructure
+**Test Environment:** `node` (not `jsdom`)
 
-1. **Backend:**
-   - No pytest installation
-   - No test directory structure
-   - No conftest.py fixtures
-   - No test files
-
-2. **Frontend:**
-   - No Jest/Vitest configuration
-   - No test directory structure
-   - No test files
-   - No @testing-library/react installed
-
-### Priority Areas for Testing
-
-1. **Backend API endpoints** (`/health`, `/api/health`)
-2. **Configuration loading** (`config.py`)
-3. **CORS middleware** behavior
-4. **Logging configuration**
+**Implications:**
+- No DOM APIs available in tests
+- Component tests test logic/interfaces, not rendering
+- Would need `@testing-library/react` for DOM testing
 
 ---
 
-*Testing analysis: 2026-03-07*
+*Testing analysis: 2026-03-10*
