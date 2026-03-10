@@ -52,11 +52,203 @@ def _build_context_summary(session: NegotiationSession) -> str:
 
 def build_system_prompt(context: str) -> str:
     return MASTER_NEGOTIATION_PROMPT.replace("{context}", context)
+def build_advisor_query(state: dict, transcript: list = None) -> str:
+    """
+    Build comprehensive ADVISOR_QUERY with full negotiation context.
+    
+    Args:
+        state: Negotiation state containing item, prices, market_data
+        transcript: List of transcript entries (optional)
+    
+    Returns:
+        Formatted ADVISOR_QUERY string with full context
+    """
+    item = state.get('item') or 'the item being negotiated'
+    seller_price = state.get('seller_price')
+    target_price = state.get('target_price')
+    max_price = state.get('max_price')
+    market_data = state.get('market_data', {})
+    
+    conversation_context = ""
+    if transcript and len(transcript) > 0:
+        recent = transcript[-10:] if len(transcript) > 10 else transcript
+        conversation_context = "Recent conversation:\n"
+        for entry in recent:
+            speaker = entry.get('speaker', 'Unknown')
+            text = entry.get('text', '')
+            conversation_context += f"{speaker}: {text}\n"
+        
+        if len(transcript) > 10:
+            conversation_context += f"\n(+ {len(transcript) - 10} earlier messages)"
+    
+    market_context = ""
+    if market_data:
+        price_range = market_data.get('price_range', {})
+        if price_range and price_range.get('min') is not None:
+            market_context = f"""
+Market Research:
+- Price range: ₹{price_range['min']:,.0f} - ₹{price_range['max']:,.0f}
+- Average: ₹{price_range.get('average', 'N/A'):,.0f}
+- Sample: {price_range.get('sample_size', 0)} listings
+"""
+    
+    query = f"""🔔 ADVISOR_QUERY: The USER needs your advice RIGHT NOW 🔔
+
+ITEM: {item}
+SELLER PRICE: {f'₹{seller_price:,.0f}' if seller_price else 'Not mentioned'}
+USER TARGET: {f'₹{target_price:,.0f}' if target_price else 'Not mentioned'}
+USER MAX: {f'₹{max_price:,.0f}' if max_price else 'Not mentioned'}
+{market_context}
+{conversation_context}
+
+Analyze the situation and provide strategic advice:
+1. What information is missing that would help?
+2. What does the market data suggest about fair price?
+3. What specific tactics should the USER use?
+
+RESPOND WITH AUDIO: Speak your advice out loud. Be specific and actionable."""
+
+    return query
+
+
+async def trigger_advice_response(live_session, state: dict, transcript: list = None) -> None:
+    """
+    Trigger AI advice response by sending a special audio tone or text message.
+
+    The Gemini Live API in AUDIO mode may not respond to text-only inputs.
+    We need to either:
+    1. Send a brief audio signal to trigger the response
+    2. Use the send() method with proper formatting
+    3. Rely on the system prompt to make AI proactive
+
+    Args:
+        live_session: Active Gemini Live API session
+        state: Current negotiation state object
+        transcript: List of transcript entries for context
+
+    Raises:
+        Exception: If the message fails to send
+    """
+    # Build ADVISOR_QUERY from state with clear trigger marker
+    query = build_advisor_query(state, transcript=transcript)
+    
+    logger.info(f"Sending ADVISOR_QUERY to Gemini (length: {len(query)} chars)")
+    logger.info(f"Query preview: {query[:200]}...")
+
+    # APPROACH 1: Try sending as text with end_of_turn
+    # This should work if the AI is configured to respond to text inputs
+    try:
+        await live_session.send(query, end_of_turn=True)
+        logger.info("ADVISOR_QUERY sent via send() method, waiting for AI response...")
+        return
+    except Exception as e:
+        logger.warning(f"send() method failed: {e}, trying alternative...")
+
+    # APPROACH 2: Try using tool_response format to trigger a response
+    try:
+        # Send as a realtime input with text
+        await live_session.send_realtime_input(
+            text=query,
+            end_of_turn=True
+        )
+        logger.info("ADVISOR_QUERY sent via send_realtime_input(), waiting for AI response...")
+        return
+    except Exception as e:
+        logger.warning(f"send_realtime_input() failed: {e}, trying final approach...")
+    
+    # APPROACH 3: Fallback to send_client_content
+    try:
+        await live_session.send_client_content(
+            turns=[{"role": "user", "parts": [{"text": query}]}],
+            turn_complete=True
+        )
+        logger.info("ADVISOR_QUERY sent via send_client_content(), waiting for AI response...")
+    except Exception as e:
+        logger.error(f"All send methods failed: {e}")
+        raise
+
+
+
+
+async def perform_web_search(query: str) -> dict:
+    """
+    Perform web search for any query the AI constructs.
+    
+    This function returns a structured result that will be populated by
+    Google Search grounding when the function is called by Gemini.
+    
+    Args:
+        query: Search query constructed by AI based on conversation context
+        
+    Returns:
+        dict: {
+            "query": str,
+            "results": str,  # Search results summary
+            "timestamp": float
+        }
+    """
+    # The actual search is handled by Google Search grounding
+    # This function returns the expected format for Gemini
+    return {
+        "query": query,
+        "results": "Will be populated by Google Search grounding",
+        "timestamp": time.time()
+    }
+
+
+async def handle_function_call(
+    function_name: str,
+    args: dict,
+    websocket: WebSocket
+) -> dict:
+    """
+    Handle function calls from Gemini.
+    
+    This function processes function calls triggered by the AI during advice
+    generation. Currently supports the web_search function for autonomous
+    market research.
+    
+    Args:
+        function_name: Name of the function to call (e.g., "web_search")
+        args: Function arguments as a dictionary
+        websocket: WebSocket connection for sending notifications to frontend
+        
+    Returns:
+        Function result dictionary to send back to Gemini
+        
+    Raises:
+        Exception: If function execution fails
+    """
+    if function_name == "web_search":
+        query = args.get("query", "")
+        
+        # Notify frontend that research has started
+        await websocket.send_json({
+            "type": "RESEARCH_STARTED",
+            "payload": {"query": query}
+        })
+        
+        # Perform search (using Google Search grounding)
+        result = await perform_web_search(query)
+        
+        # Notify frontend with results
+        await websocket.send_json({
+            "type": "RESEARCH_COMPLETE",
+            "payload": result
+        })
+        
+        return result
+    
+    # Unknown function
+    return {"error": f"Unknown function: {function_name}"}
+
 
 async def handle_gemini_text(websocket: WebSocket, session_id: str, text: str) -> None:
-    """Handle text responses from Gemini, extracting strategy updates and AI responses."""
+    """Handle text responses from Gemini, extracting strategy updates, state updates, and AI responses."""
     STRATEGY_PATTERN = re.compile(r'<strategy>(.*?)</strategy>', re.DOTALL)
+    STATE_UPDATE_PATTERN = re.compile(r'<state_update>(.*?)</state_update>', re.DOTALL)
     
+    # Extract and send strategy updates
     strategies = STRATEGY_PATTERN.findall(text)
     for strategy_str in strategies:
         try:
@@ -67,8 +259,23 @@ async def handle_gemini_text(websocket: WebSocket, session_id: str, text: str) -
             })
         except json.JSONDecodeError:
             logger.warning(f"Failed to parse strategy JSON from session {session_id}: {strategy_str}")
+    
+    # Extract and send state updates (NEW)
+    state_updates = STATE_UPDATE_PATTERN.findall(text)
+    for state_str in state_updates:
+        try:
+            state_data = json.loads(state_str)
+            logger.info(f"Extracted state update from AI [{session_id}]: {state_data}")
+            await websocket.send_json({
+                "type": "STATE_UPDATE",
+                "payload": state_data
+            })
+        except json.JSONDecodeError:
+            logger.warning(f"Failed to parse state update JSON from session {session_id}: {state_str}")
             
-    remaining_text = STRATEGY_PATTERN.sub('', text).strip()
+    # Remove all XML tags from text before sending as AI response
+    remaining_text = STRATEGY_PATTERN.sub('', text)
+    remaining_text = STATE_UPDATE_PATTERN.sub('', remaining_text).strip()
     
     if remaining_text:
         await websocket.send_json({
@@ -77,6 +284,105 @@ async def handle_gemini_text(websocket: WebSocket, session_id: str, text: str) -
                 "response_type": "coaching",
                 "text": remaining_text,
                 "timestamp": time.time()
+            }
+        })
+
+
+async def extract_state_from_transcript(
+    websocket: WebSocket, 
+    session_id: str, 
+    speaker: str, 
+    text: str
+) -> None:
+    """
+    You are a silent negotiation advisor listening to a live negotiation.
+
+YOUR ROLE:
+- Listen to the conversation between USER and COUNTERPARTY
+- Track negotiation details (item, prices, offers, concerns)
+- Stay COMPLETELY SILENT unless you see the ADVISOR_QUERY signal
+
+CRITICAL RULES:
+1. NEVER respond to the conversation directly
+2. NEVER answer questions from USER or COUNTERPARTY
+3. ONLY respond when you see: "🔔 ADVISOR_QUERY: USER NEEDS ADVICE NOW 🔔"
+4. When you see ADVISOR_QUERY: Provide brief, actionable advice (1-2 sentences)
+5. After giving advice: Return to SILENT listening mode
+
+You are an invisible advisor. The negotiating parties cannot hear you unless the user explicitly asks for advice
+    """
+    state_update = {}
+    
+    # Extract item names (improved patterns)
+    # Look for common product patterns
+    item_patterns = [
+        # Brand + Model + Variant (iPhone 14 Pro Max, MacBook Pro 2020, etc.)
+        r'\b(iPhone\s+\d+(?:\s+Pro)?(?:\s+Max)?)\b',
+        r'\b(MacBook\s+(?:Pro|Air)\s*\d*)\b',
+        r'\b(iPad\s+(?:Pro|Air|Mini)?\s*\d*)\b',
+        r'\b([A-Z][a-z]+\s+[A-Z][a-z]+\s+\d+(?:\s+(?:Pro|Plus|Max|Air|Mini))?)\b',  # Generic: Toyota Camry 2020
+        # General pattern: looking at/interested in + product
+        r'(?:looking at|interested in|buying|selling|want to buy)\s+(?:a\s+|an\s+|this\s+)?([A-Z][A-Za-z0-9\s]+(?:Pro|Plus|Max|Air|Mini)?)',
+    ]
+    
+    extracted_item = None
+    for pattern in item_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            item = match.group(1).strip()
+            # Filter out common false positives
+            if len(item) > 3 and item not in ['I am', 'You are', 'This is', 'I want', 'Want to']:
+                extracted_item = item
+                break
+    
+    # Only include item if we extracted one
+    # Frontend will merge intelligently (prefer longer names)
+    if extracted_item:
+        state_update['item'] = extracted_item
+    
+    # Extract prices
+    # Look for currency symbols or keywords followed by numbers
+    price_patterns = [
+        r'(?:₹|Rs\.?|INR)\s*(\d+(?:,\d+)*(?:\.\d+)?)',  # Indian Rupee
+        r'(?:\$|USD)\s*(\d+(?:,\d+)*(?:\.\d+)?)',  # US Dollar
+        r'(?:€|EUR)\s*(\d+(?:,\d+)*(?:\.\d+)?)',  # Euro
+        r'(?:price|cost|worth|selling for|asking)\s+(?:is\s+)?(?:₹|Rs\.?|\$|€)?\s*(\d+(?:,\d+)*(?:\.\d+)?)',
+    ]
+    
+    for pattern in price_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            price_str = match.group(1).replace(',', '')
+            try:
+                price = float(price_str)
+                
+                # Determine if this is seller price, target, or max based on context
+                if speaker == "counterparty" or "selling" in text.lower() or "asking" in text.lower():
+                    state_update['seller_price'] = price
+                elif "hoping for" in text.lower() or "target" in text.lower() or "want" in text.lower():
+                    state_update['target_price'] = price
+                elif "maximum" in text.lower() or "can't go above" in text.lower() or "max" in text.lower():
+                    state_update['max_price'] = price
+                else:
+                    # Default: if user mentions a price, it's likely their target
+                    if speaker == "user":
+                        state_update['target_price'] = price
+                    else:
+                        state_update['seller_price'] = price
+                        
+                break
+            except ValueError:
+                pass
+    
+    # Send state update if we extracted anything
+    # Include merge_strategy hint for frontend
+    if state_update:
+        logger.info(f"Auto-extracted state from transcript [{session_id}]: {state_update}")
+        await websocket.send_json({
+            "type": "STATE_UPDATE",
+            "payload": {
+                **state_update,
+                "_merge_strategy": "smart"  # Hint to frontend to merge intelligently
             }
         })
 
@@ -102,22 +408,54 @@ class GeminiClient:
             )
         
         config = types.LiveConnectConfig(
-            response_modalities=["AUDIO"],
+            # NOTE: Removing response_modalities to allow AI to choose response format
+            # This may enable the AI to respond to text queries with audio
             system_instruction=build_system_prompt(context),
             
-            # Generation config for faster, shorter responses
+            # Generation config
             generation_config=types.GenerationConfig(
-                temperature=0.7,
-                max_output_tokens=150,  # Limit response length for speed
-                candidate_count=1
+                temperature=1.0,  # Maximum creativity/responsiveness
+                max_output_tokens=500,
+                candidate_count=1,
+                top_p=0.95,  # Nucleus sampling for more varied responses
+                top_k=40  # Consider top 40 tokens
             ),
             
-            # Disable features that add latency
-            enable_affective_dialog=False,
+            # Speech configuration - CRITICAL for audio output
+            speech_config=types.SpeechConfig(
+                voice_config=types.VoiceConfig(
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                        voice_name="Puck"  # Or "Charon", "Kore", "Fenrir", "Aoede"
+                    )
+                )
+            ),
             
-            # Enable transcriptions
+            # Enable transcriptions (separate from response modalities)
             input_audio_transcription=types.AudioTranscriptionConfig(),
-            output_audio_transcription=types.AudioTranscriptionConfig()
+            output_audio_transcription=types.AudioTranscriptionConfig(),
+            
+            # Register function calling tools
+            tools=[
+                types.Tool(
+                    function_declarations=[
+                        types.FunctionDeclaration(
+                            name="web_search",
+                            description="Search the web for any information needed to provide negotiation advice.",
+                            parameters={
+                                "type": "object",
+                                "properties": {
+                                    "query": {
+                                        "type": "string",
+                                        "description": "The search query"
+                                    }
+                                },
+                                "required": ["query"]
+                            }
+                        )
+                    ]
+                ),
+                types.Tool(google_search=types.GoogleSearch())
+            ]
         )
         
         try:
@@ -186,13 +524,19 @@ class GeminiClient:
             logger.error(f"Audio chunk send failed [{session_id}]: {e}")
 
     @staticmethod
-    async def receive_responses(live_session, websocket: WebSocket, session_id: str) -> None:
+    async def receive_responses(live_session, websocket: WebSocket, session_id: str, session=None) -> None:
         """
         Receive responses from Gemini Live API.
 
         IMPORTANT: The receive() iterator ends after each turn_complete.
         We need to call receive() again for each new turn to continue the conversation.
         This is the expected behavior of the Gemini Live API SDK.
+        
+        Args:
+            live_session: Gemini Live API session
+            websocket: WebSocket connection to frontend
+            session_id: Session ID for logging
+            session: NegotiationSession object (optional, for speaker identification)
         """
         total_responses = 0
         turn_count = 0
@@ -209,11 +553,24 @@ class GeminiClient:
                 async for response in live_session.receive():
                     total_responses += 1
                     turn_response_count += 1
+                    
+                    # Log every response for debugging
+                    logger.info(f"Response #{total_responses}: {type(response).__name__} [{session_id}]")
 
                     if not response.server_content:
+                        logger.info(f"Response #{total_responses}: No server_content [{session_id}]")
                         continue
 
                     sc = response.server_content
+                    
+                    # Log what fields are present in server_content
+                    has_model_turn = hasattr(sc, 'model_turn') and sc.model_turn
+                    has_interrupted = hasattr(sc, 'interrupted') and sc.interrupted
+                    has_turn_complete = hasattr(sc, 'turn_complete') and sc.turn_complete
+                    has_input_transcript = hasattr(sc, 'input_transcription') and sc.input_transcription
+                    has_output_transcript = (hasattr(sc, 'output_transcription') and sc.output_transcription) or (hasattr(sc, 'output_audio_transcription') and sc.output_audio_transcription)
+                    
+                    logger.info(f"Response #{total_responses}: model_turn={has_model_turn}, interrupted={has_interrupted}, turn_complete={has_turn_complete}, input_transcript={has_input_transcript}, output_transcript={has_output_transcript} [{session_id}]")
 
                     if sc.interrupted:
                         logger.info(f"Interruption detected [{session_id}]")
@@ -230,27 +587,77 @@ class GeminiClient:
                                 await websocket.send_bytes(pcm_bytes)
                             elif part.text:
                                 await handle_gemini_text(websocket, session_id, part.text)
+                            elif hasattr(part, 'function_call') and part.function_call:
+                                # Handle function call from Gemini
+                                function_name = part.function_call.name
+                                function_args = dict(part.function_call.args) if part.function_call.args else {}
+                                
+                                logger.info(f"Function call received: {function_name}({function_args}) [{session_id}]")
+                                
+                                try:
+                                    # Execute the function
+                                    result = await handle_function_call(function_name, function_args, websocket)
+                                    
+                                    # Send function response back to Gemini
+                                    await live_session.send({
+                                        "function_response": {
+                                            "id": part.function_call.id if hasattr(part.function_call, 'id') else None,
+                                            "name": function_name,
+                                            "response": result
+                                        }
+                                    })
+                                    
+                                    logger.info(f"Function response sent for {function_name} [{session_id}]")
+                                except Exception as e:
+                                    logger.error(f"Function call failed: {function_name} - {e} [{session_id}]")
+                                    # Send error response back to Gemini
+                                    await live_session.send({
+                                        "function_response": {
+                                            "id": part.function_call.id if hasattr(part.function_call, 'id') else None,
+                                            "name": function_name,
+                                            "response": {"error": str(e)}
+                                        }
+                                    })
 
                     if sc.input_transcription and sc.input_transcription.text:
-                        logger.debug(f"User transcript: {sc.input_transcription.text} [{session_id}]")
+                        # Get speaker label from session (voice fingerprinting) or default to "user"
+                        speaker = session.current_speaker if session and hasattr(session, 'current_speaker') else "user"
+                        
+                        # Create transcript payload
+                        transcript_payload = {
+                            "speaker": speaker,
+                            "text": sc.input_transcription.text,
+                            "timestamp": int(time.time() * 1000)
+                        }
+                        
+                        logger.info(f"📝 Transcript received: '{sc.input_transcription.text}' (current_speaker={speaker}) [{session_id}]")
+                        
+                        # CRITICAL FIX TEMPORARILY DISABLED: Send transcripts immediately
+                        # without waiting for speaker identification
+                        logger.info(f"✅ Sending transcript immediately (speaker={speaker.upper()}) [{session_id}]")
                         await websocket.send_json({
                             "type": "TRANSCRIPT_UPDATE",
-                            "payload": {
-                                "speaker": "user",
-                                "text": sc.input_transcription.text,
-                                "timestamp": int(time.time() * 1000)
-                            }
+                            "payload": transcript_payload
                         })
+                        
                         # User is speaking, so AI is listening
                         await websocket.send_json({
                             "type": "AI_LISTENING",
                             "payload": {}
                         })
+                        
+                        # Extract state from transcript with correct speaker label
+                        await extract_state_from_transcript(
+                            websocket, 
+                            session_id, 
+                            speaker, 
+                            sc.input_transcription.text
+                        )
 
                     # Use output_transcription for Vertex AI
                     output_transcription = getattr(sc, 'output_transcription', None) or getattr(sc, 'output_audio_transcription', None)
                     if output_transcription and output_transcription.text:
-                        logger.debug(f"AI transcript: {output_transcription.text} [{session_id}]")
+                        logger.info(f"✓ AI TRANSCRIPT: '{output_transcription.text}' [{session_id}]")
                         # AI is speaking
                         await websocket.send_json({
                             "type": "AI_SPEAKING",
@@ -264,6 +671,14 @@ class GeminiClient:
                                 "timestamp": int(time.time() * 1000)
                             }
                         })
+                        
+                        # Extract state from AI transcript (counterparty)
+                        await extract_state_from_transcript(
+                            websocket, 
+                            session_id, 
+                            "counterparty", 
+                            output_transcription.text
+                        )
 
                     # Check for turn_complete - this signals the end of this receive() iteration
                     if hasattr(sc, 'turn_complete') and sc.turn_complete:
@@ -362,3 +777,21 @@ send_vision_frame = GeminiClient.send_vision_frame
 send_audio_chunk = GeminiClient.send_audio_chunk
 receive_responses = GeminiClient.receive_responses
 monitor_session_lifetime = GeminiClient.monitor_session_lifetime
+
+# Export the new functions for manual activity control
+__all__ = [
+    'GeminiClient',
+    'GeminiUnavailableError',
+    'build_system_prompt',
+    'build_advisor_query',
+    'trigger_advice_response',
+    'handle_function_call',
+    'perform_web_search',
+    'open_live_session',
+    'send_vision_frame',
+    'send_audio_chunk',
+    'receive_responses',
+    'monitor_session_lifetime',
+    'handle_gemini_text',
+    'extract_state_from_transcript'
+]
