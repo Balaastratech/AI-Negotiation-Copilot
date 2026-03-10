@@ -1,59 +1,57 @@
-# AI Negotiation Copilot
+# AI Negotiation Copilot Improvements
 
 ## What This Is
 
-AI Negotiation Copilot is a multimodal real-time negotiation assistant designed to help users obtain better prices, terms, or agreements during real-world negotiations. Built specifically for the Live Agent category, it observes the negotiation environment through visual input, listens to the conversation through voice input, and generates structured negotiation intelligence through text and spoken guidance.
+A real-time AI negotiation advisor that listens to conversations between users and counterparties, providing strategic advice on demand through a button-triggered system. The immediate focus is improving the current AI's advice quality.
 
 ## Core Value
 
-Continuously gather information from the environment and guide the user through the negotiation process in real-time to secure better deals, acting strictly as a copilot without ever negotiating autonomously on their behalf.
+Users get contextual, data-backed negotiation advice that helps them negotiate better deals, rather than generic random suggestions.
 
 ## Requirements
 
 ### Validated
 
-<!-- Shipped and confirmed valuable. -->
-
 (None yet — ship to validate)
 
 ### Active
 
-<!-- Current scope. Building toward these. -->
-
-- [ ] Multimodal environment observation (Vision for reading price boards, product names, contracts)
-- [ ] Voice interaction and conversation monitoring via Gemini Live API
-- [ ] Real-time market context analysis and price comparison via Google Cloud integrations
-- [ ] Dynamic negotiation strategy generation (opening approach, counteroffers, logical justifications)
-- [ ] Adaptive strategy adjustment based on live conversation analysis
-- [ ] Deal closure tracking, savings calculation, and effectiveness summary
-- [ ] Privacy & Audio Control toggle for strict legal compliance during audio capture
-- [ ] Negotiation Dashboard UI comprising visual capture area, strategy info, conversation transcript, and recommendation panel
+- [ ] Phase 1: Enhanced Master Prompt with detailed AI instructions
+- [ ] Phase 2: Adaptive Context-Aware Query system
+- [ ] Phase 3: Web Search Integration for market research
+- [ ] Phase 4: Testing & Refinement
 
 ### Out of Scope
 
-<!-- Explicit boundaries. Includes reasoning to prevent re-adding. -->
-
-- Autonomous negotiation on behalf of the user — The assistant acts strictly as a copilot, leaving the user as the primary participant in control.
+- Voice fingerprinting for speaker diarization — defer to future (WHAT_WE_ARE_BUILDING.md vision)
+- Video stream processing — defer to future
+- Dual live session architecture — defer to future
 
 ## Context
 
-- Intended to support negotiations in everyday situations: purchasing products, negotiating hotel prices, bargaining in marketplaces, service fees, freelance contracts, salary, real estate, and business procurement.
-- Transforms visual information from the real world into structured data and monitors live conversation dialogue, handling natural interruptions and conversational barge-ins gracefully.
+The project has an existing codebase with:
+- Backend: Python/FastAPI with Gemini Live API integration
+- Frontend: TypeScript/React with WebSocket connections
+- Current issues: AI gives random unrealistic advice, lacks market research capability
+
+Key documents:
+- `WHAT_WE_ARE_BUILDING.md` — Long-term vision (Gemini Live redesign)
+- `NEGOTIATION_AI_IMPROVEMENT_PLAN.md` — Immediate improvement plan with 4 phases
 
 ## Constraints
 
-- **Platform**: Hosted entirely on Google Cloud — Required by architectural definition.
-- **Technology**: Built on Gemini Live API — Essential for low-latency multimodal interaction (Vision, Voice, Text).
-- **Compliance**: Must include explicit consent toggles for microphone monitoring to ensure legal compliance and protect participant privacy.
+- **Tech Stack**: Python FastAPI backend, React frontend, Gemini Live API
+- **Timeline**: Hackathon demo focused
+- **Dependencies**: Google Gemini API, WebSocket connections
 
 ## Key Decisions
 
-<!-- Decisions that constrain future work. Add throughout project lifecycle. -->
-
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Multimodal architecture (Vision + Voice + Text) | Necessary to understand both the physical/digital environment and active conversation simultaneously. | — Pending |
-| User-in-the-loop operation | Prevents liability from autonomous agents and maintains user control and agency in sensitive negotiations. | — Pending |
+| Phase 1 first | Foundation for all subsequent phases | — Pending |
+| Hybrid context (Phase 2) | Balance history + recent precision | — Pending |
+| Backend pre-search (Phase 3) | Simpler implementation | — Pending |
+| AI decides when to research | More efficient, intent-driven | — Pending |
 
 ---
-*Last updated: 2026-03-06 after initialization*
+*Last updated: 2026-03-10 after project initialization*
