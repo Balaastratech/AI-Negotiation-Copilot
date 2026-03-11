@@ -4,9 +4,9 @@
 
 The Button-Triggered Advice System redesigns the AI Negotiation Copilot to eliminate the 10-20 second latency caused by Gemini Live API's automatic Voice Activity Detection (VAD). By disabling VAD and implementing manual activity control, the system transforms from a slow turn-based conversation into a fast, on-demand advisory system where the AI listens silently to the entire negotiation and responds instantly (3-5 seconds) when the user taps an "Ask AI" button.
 
-The system enables hands-free negotiation where both the user and counterparty can speak naturally without interruption. The AI maintains full context awareness through continuous audio streaming, local voice fingerprinting for speaker diarization, and client-side state management. When advice is needed, a single button tap triggers an immediate response based on the complete conversation history, market research, and negotiation state.
+The system enables hands-free negotiation where both the user and counterparty can speak naturally without interruption. The AI maintains full context awareness through continuous audio streaming, local voice fingerprinting for speaker diarization, and client-side state management. The AI automatically extracts negotiation context (item, prices, goals) from the conversation transcript, eliminating the need for manual data entry. When advice is needed, a single button tap triggers an immediate response based on the complete conversation history, market research, and negotiation state.
 
-This Phase 1 implementation focuses on five core components: VAD disable with button-tap control, local MFCC-based voice fingerprinting, client-side state management, function calling for market research, and the "Ask AI" button UI.
+This Phase 1 implementation focuses on five core components: VAD disable with button-tap control, local MFCC-based voice fingerprinting, client-side state management with AI-driven context extraction, function calling for market research, and the "Ask AI" button UI.
 
 ## Architecture
 
@@ -20,12 +20,16 @@ The system follows a client-server architecture with real-time bidirectional com
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                   │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
-│  │ "Ask AI"     │  │ Voice        │  │ State        │          │
-│  │ Button UI    │  │ Fingerprint  │  │ Manager      │          │
-│  │              │  │ (MFCC)       │  │              │          │
+│  │ Voice        │  │ "Ask AI"     │  │ State        │          │
+│  │ Enrollment   │  │ Button UI    │  │ Manager      │          │
+│  │ Screen       │  │              │  │              │          │
 │  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘          │
 │         │                 │                 │                    │
-│         └─────────────────┴─────────────────┘                    │
+│         │        ┌────────▼────────┐        │                    │
+│         │        │ Voice           │        │                    │
+│         └───────►│ Fingerprint     │◄───────┘                    │
+│                  │ (MFCC)          │                             │
+│                  └────────┬────────┘                             │
 │                           │                                      │
 │                  ┌────────▼────────┐                            │
 │                  │  WebSocket      │                            │
@@ -63,6 +67,37 @@ The system follows a client-server architecture with real-time bidirectional com
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+### User Flow
+
+**Enrollment Flow:**
+```
+App Launch
+    → VoiceEnrollmentScreen displays
+    → "Voice Setup" heading shown
+    → "Speak for 3 seconds..." instruction
+    → Recording starts automatically
+    → Red dot + countdown (3...2...1) displayed
+    → Audio captured (3 seconds)
+    → "Processing..." spinner shown
+    → MFCC extraction + voiceprint creation
+    → "✓ Voice captured!" confirmation
+    → Auto-transition to negotiation screen (1s delay)
+```
+
+**Negotiation Flow:**
+```
+Negotiation Screen
+    → Continuous audio streaming begins
+    → AI listens silently (Silent_Listening_Mode)
+    → Transcript updates with speaker labels
+    → AI extracts item, prices from conversation
+    → User taps "Ask AI" button
+    → State bundled + sent to backend
+    → AI generates advice (3-5s)
+    → Audio response plays
+    → Return to Silent_Listening_Mode
+```
+
 ### Operating Modes
 
 The system operates in two distinct modes:
@@ -93,6 +128,7 @@ User/Counterparty Speech
     → WebSocket → Backend
     → Gemini Live API
     → Transcription
+    → AI extracts context (item, prices)
     → State Manager Update
 ```
 
@@ -171,11 +207,11 @@ async def trigger_advice_response(
 **ADVISOR_QUERY Format:**
 ```
 ADVISOR_QUERY:
-ITEM: {item}
-SELLER_PRICE: {seller_price}
-TARGET_PRICE: {target_price}
-MAX_PRICE: {max_price}
-MARKET_DATA: {market_data}
+ITEM: {item}  // Extracted from conversation or "Unknown"
+SELLER_PRICE: {seller_price}  // Latest counterparty offer
+TARGET_PRICE: {target_price}  // Extracted from user's statements or "Unknown"
+MAX_PRICE: {max_price}  // Extracted from user's statements or "Unknown"
+MARKET_DATA: {market_data}  // Research results if available
 TRANSCRIPT:
 {labeled_transcript}
 
@@ -287,17 +323,17 @@ function extractMFCC(
 
 ### Component 3: Client-Side State Manager
 
-**Purpose:** Track negotiation context in a simple JavaScript object, updated from transcript and button taps.
+**Purpose:** Track negotiation context in a simple JavaScript object, with item and prices extracted by the AI from conversation transcript.
 
 **Location:** `frontend/hooks/useNegotiation.ts`
 
 **State Object Structure:**
 ```typescript
 interface NegotiationState {
-  item: string;              // e.g., "Used MacBook Pro 2020"
+  item: string;              // Extracted by AI from conversation
   seller_price: number | null; // Latest price from counterparty
-  target_price: number;      // User's ideal price
-  max_price: number;         // User's walk-away price
+  target_price: number;      // Extracted by AI from user's statements
+  max_price: number;         // Extracted by AI from user's statements
   market_data: string | null; // Market research results
   transcript: TranscriptEntry[]; // Last 90 seconds
 }
@@ -320,20 +356,6 @@ function useNegotiationState() {
     market_data: null,
     transcript: []
   });
-  
-  // Initialize state from user input
-  const initializeState = (
-    item: string,
-    targetPrice: number,
-    maxPrice: number
-  ) => {
-    setState(prev => ({
-      ...prev,
-      item,
-      target_price: targetPrice,
-      max_price: maxPrice
-    }));
-  };
   
   // Add transcript entry
   const addTranscriptEntry = (
@@ -368,6 +390,14 @@ function useNegotiationState() {
     });
   };
   
+  // Update state from AI extraction
+  const updateStateFromAI = (updates: Partial<NegotiationState>) => {
+    setState(prev => ({
+      ...prev,
+      ...updates
+    }));
+  };
+  
   // Update market data
   const updateMarketData = (data: string) => {
     setState(prev => ({
@@ -378,8 +408,8 @@ function useNegotiationState() {
   
   return {
     state,
-    initializeState,
     addTranscriptEntry,
+    updateStateFromAI,
     updateMarketData
   };
 }
@@ -407,9 +437,9 @@ function extractPriceFromText(text: string): number | null {
 }
 ```
 
-### Component 4: Function Calling for Market Research
+### Component 4: Autonomous Research Function Calling
 
-**Purpose:** Enable AI to autonomously trigger market price research when needed.
+**Purpose:** Enable AI to autonomously trigger web research for any information it determines is needed.
 
 **Location:** `backend/app/services/gemini_client.py`
 
@@ -419,21 +449,17 @@ tools = [
     types.Tool(
         function_declarations=[
             types.FunctionDeclaration(
-                name="search_market_price",
-                description="Search current market price for an item. Use this when you need to know the fair market value to provide data-driven advice.",
+                name="web_search",
+                description="Search the web for any information needed to provide negotiation advice. You decide what to search for based on the conversation. Examples: market prices, product reviews, competitor offerings, location-specific rates, product specifications, etc.",
                 parameters={
                     "type": "object",
                     "properties": {
-                        "item": {
+                        "query": {
                             "type": "string",
-                            "description": "The item to search for (e.g., 'Used MacBook Pro 2020')"
-                        },
-                        "location": {
-                            "type": "string",
-                            "description": "Location for price search (e.g., 'India', 'USA')"
+                            "description": "The search query you construct based on what information you need (e.g., 'iPhone 14 Pro market price India', 'hotel rates Bandra Mumbai tonight', 'used MacBook Pro 2020 average price')"
                         }
                     },
-                    "required": ["item"]
+                    "required": ["query"]
                 }
             )
         ]
@@ -460,22 +486,21 @@ async def handle_function_call(
     Returns:
         Function result to send back to Gemini
     """
-    if function_name == "search_market_price":
-        item = args.get("item", "")
-        location = args.get("location", "")
+    if function_name == "web_search":
+        query = args.get("query", "")
         
         # Notify frontend
         await websocket.send_json({
-            "type": "MARKET_RESEARCH_STARTED",
-            "payload": {"item": item}
+            "type": "RESEARCH_STARTED",
+            "payload": {"query": query}
         })
         
         # Perform search (using Google Search grounding)
-        result = await search_market_price(item, location)
+        result = await perform_web_search(query)
         
         # Notify frontend with results
         await websocket.send_json({
-            "type": "MARKET_RESEARCH_COMPLETE",
+            "type": "RESEARCH_COMPLETE",
             "payload": result
         })
         
@@ -483,27 +508,25 @@ async def handle_function_call(
     
     return {"error": "Unknown function"}
 
-async def search_market_price(
-    item: str,
-    location: str
-) -> dict:
+async def perform_web_search(query: str) -> dict:
     """
-    Search market price for an item.
+    Perform web search for any query the AI constructs.
     
+    Args:
+        query: Search query constructed by AI
+        
     Returns:
         dict: {
-            "low": float,
-            "mid": float,
-            "high": float,
-            "sources": list[str]
+            "query": str,
+            "results": str,  # Search results summary
+            "timestamp": float
         }
     """
     # This will be handled by Google Search grounding
     # Return format for Gemini
     return {
-        "item": item,
-        "location": location,
-        "price_range": "Will be populated by Google Search",
+        "query": query,
+        "results": "Will be populated by Google Search",
         "timestamp": time.time()
     }
 ```
@@ -590,6 +613,297 @@ function formatTranscript(entries: TranscriptEntry[]): string {
   return entries
     .map(e => `[${e.speaker}] ${e.text}`)
     .join('\n');
+}
+```
+
+### Component 6: Voice Enrollment Screen
+
+**Purpose:** Provide a clear, guided user interface for voice enrollment with visual feedback at each step.
+
+**Location:** `frontend/components/enrollment/VoiceEnrollmentScreen.tsx`
+
+**Component Interface:**
+```typescript
+interface VoiceEnrollmentScreenProps {
+  onEnrollmentComplete: (voiceprint: VoiceFingerprint) => void;
+  onError: (error: Error) => void;
+}
+
+type EnrollmentState = 
+  | 'ready'
+  | 'recording'
+  | 'processing'
+  | 'success'
+  | 'error';
+
+interface EnrollmentUIState {
+  state: EnrollmentState;
+  countdown: number | null;
+  errorMessage: string | null;
+}
+```
+
+**Component Implementation:**
+```typescript
+function VoiceEnrollmentScreen({ 
+  onEnrollmentComplete, 
+  onError 
+}: VoiceEnrollmentScreenProps) {
+  const [uiState, setUIState] = useState<EnrollmentUIState>({
+    state: 'ready',
+    countdown: null,
+    errorMessage: null
+  });
+  
+  const [audioBuffer, setAudioBuffer] = useState<Float32Array[]>([]);
+  
+  useEffect(() => {
+    // Auto-start recording when component mounts
+    startRecording();
+  }, []);
+  
+  const startRecording = async () => {
+    try {
+      // Request microphone access
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          sampleRate: 16000,
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true
+        }
+      });
+      
+      // Start recording with countdown
+      setUIState({ state: 'recording', countdown: 3, errorMessage: null });
+      
+      // Collect audio for 3 seconds
+      const chunks: Float32Array[] = [];
+      const audioContext = new AudioContext({ sampleRate: 16000 });
+      const source = audioContext.createMediaStreamSource(stream);
+      const processor = audioContext.createScriptProcessor(4096, 1, 1);
+      
+      processor.onaudioprocess = (e) => {
+        const inputData = e.inputBuffer.getChannelData(0);
+        chunks.push(new Float32Array(inputData));
+      };
+      
+      source.connect(processor);
+      processor.connect(audioContext.destination);
+      
+      // Countdown timer
+      let countdown = 3;
+      const countdownInterval = setInterval(() => {
+        countdown--;
+        setUIState(prev => ({ ...prev, countdown }));
+        
+        if (countdown === 0) {
+          clearInterval(countdownInterval);
+        }
+      }, 1000);
+      
+      // Stop after 3 seconds
+      setTimeout(async () => {
+        processor.disconnect();
+        source.disconnect();
+        stream.getTracks().forEach(track => track.stop());
+        
+        // Process the audio
+        await processEnrollment(chunks);
+      }, 3000);
+      
+    } catch (error) {
+      setUIState({ 
+        state: 'error', 
+        countdown: null, 
+        errorMessage: 'Microphone access denied' 
+      });
+      onError(error as Error);
+    }
+  };
+  
+  const processEnrollment = async (chunks: Float32Array[]) => {
+    setUIState({ state: 'processing', countdown: null, errorMessage: null });
+    
+    try {
+      // Concatenate all chunks
+      const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+      const audioSamples = new Float32Array(totalLength);
+      let offset = 0;
+      for (const chunk of chunks) {
+        audioSamples.set(chunk, offset);
+        offset += chunk.length;
+      }
+      
+      // Extract voice fingerprint
+      const voiceprint = await enrollUserVoice(audioSamples, 16000);
+      
+      // Show success
+      setUIState({ state: 'success', countdown: null, errorMessage: null });
+      
+      // Transition to negotiation screen after 1 second
+      setTimeout(() => {
+        onEnrollmentComplete(voiceprint);
+      }, 1000);
+      
+    } catch (error) {
+      setUIState({ 
+        state: 'error', 
+        countdown: null, 
+        errorMessage: 'Failed to process voice' 
+      });
+      onError(error as Error);
+    }
+  };
+  
+  return (
+    <div className="enrollment-screen">
+      <div className="enrollment-container">
+        <h1 className="enrollment-heading">Voice Setup</h1>
+        
+        {uiState.state === 'ready' && (
+          <p className="enrollment-instruction">
+            Preparing to record...
+          </p>
+        )}
+        
+        {uiState.state === 'recording' && (
+          <>
+            <p className="enrollment-instruction">
+              Speak for 3 seconds so I can learn your voice
+            </p>
+            <div className="recording-indicator">
+              <div className="red-dot" />
+              <span className="countdown">{uiState.countdown}</span>
+            </div>
+          </>
+        )}
+        
+        {uiState.state === 'processing' && (
+          <>
+            <div className="spinner" />
+            <p className="processing-text">Processing...</p>
+          </>
+        )}
+        
+        {uiState.state === 'success' && (
+          <>
+            <div className="checkmark">✓</div>
+            <p className="success-text">Voice captured!</p>
+          </>
+        )}
+        
+        {uiState.state === 'error' && (
+          <>
+            <div className="error-icon">✗</div>
+            <p className="error-text">{uiState.errorMessage}</p>
+            <button onClick={startRecording}>Try Again</button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+```
+
+**Styling Requirements:**
+```css
+.enrollment-screen {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+  background: #f5f5f5;
+}
+
+.enrollment-container {
+  text-align: center;
+  padding: 2rem;
+  background: white;
+  border-radius: 12px;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.enrollment-heading {
+  font-size: 2rem;
+  font-weight: 600;
+  margin-bottom: 1.5rem;
+  color: #333;
+}
+
+.enrollment-instruction {
+  font-size: 1.125rem;
+  color: #666;
+  margin-bottom: 2rem;
+}
+
+.recording-indicator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+}
+
+.red-dot {
+  width: 16px;
+  height: 16px;
+  background: #ef4444;
+  border-radius: 50%;
+  animation: pulse 1s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.countdown {
+  font-size: 3rem;
+  font-weight: 700;
+  color: #333;
+}
+
+.spinner {
+  width: 48px;
+  height: 48px;
+  border: 4px solid #e5e7eb;
+  border-top-color: #3b82f6;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+  margin: 0 auto 1rem;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.processing-text {
+  font-size: 1.125rem;
+  color: #666;
+}
+
+.checkmark {
+  font-size: 4rem;
+  color: #10b981;
+  margin-bottom: 1rem;
+}
+
+.success-text {
+  font-size: 1.25rem;
+  color: #10b981;
+  font-weight: 600;
+}
+
+.error-icon {
+  font-size: 4rem;
+  color: #ef4444;
+  margin-bottom: 1rem;
+}
+
+.error-text {
+  font-size: 1.125rem;
+  color: #ef4444;
+  margin-bottom: 1rem;
 }
 ```
 
@@ -722,7 +1036,7 @@ interface AudioConfig {
 ```typescript
 // Client → Server messages
 type ClientMessage =
-  | { type: 'START_SESSION'; payload: { context: string } }
+  | { type: 'START_SESSION'; payload: { voiceprint: VoiceFingerprint } }
   | { type: 'AUDIO_CHUNK'; payload: ArrayBuffer }
   | { type: 'ASK_ADVICE'; payload: { state: NegotiationState } }
   | { type: 'END_SESSION'; payload: {} };
@@ -731,10 +1045,11 @@ type ClientMessage =
 type ServerMessage =
   | { type: 'SESSION_STARTED'; payload: { session_id: string } }
   | { type: 'TRANSCRIPT_UPDATE'; payload: TranscriptUpdate }
+  | { type: 'STATE_UPDATE'; payload: Partial<NegotiationState> }
   | { type: 'AI_LISTENING'; payload: {} }
   | { type: 'AI_SPEAKING'; payload: {} }
-  | { type: 'MARKET_RESEARCH_STARTED'; payload: { item: string } }
-  | { type: 'MARKET_RESEARCH_COMPLETE'; payload: MarketData }
+  | { type: 'RESEARCH_STARTED'; payload: { query: string } }
+  | { type: 'RESEARCH_COMPLETE'; payload: MarketData }
   | { type: 'ERROR'; payload: { message: string } }
   | ArrayBuffer;  // Audio response data
 
@@ -745,9 +1060,8 @@ interface TranscriptUpdate {
 }
 
 interface MarketData {
-  item: string;
-  location: string;
-  price_range: string;
+  query: string;
+  results: string;
   timestamp: number;
 }
 ```
@@ -872,9 +1186,9 @@ For any ADVISOR_QUERY generated from a button tap, it should include all fields 
 
 **Validates: Requirements 5.3, 9.3**
 
-### Property 13: Market Data State Update
+### Property 13: Research Data State Update
 
-For any completed market research function call, the system should update the market_data field in the state object with the returned price range information.
+For any completed research function call, the system should update the market_data field in the state object with the returned search results.
 
 **Validates: Requirements 5.4**
 
@@ -892,13 +1206,13 @@ For any negotiation state object, serializing to JSON and then deserializing sho
 
 ### Property 16: Function Call Parameters
 
-For any search_market_price function call triggered by the AI, the call should include the item parameter, and optionally the location parameter.
+For any web_search function call triggered by the AI, the call should include the query parameter constructed by the AI based on conversation context.
 
 **Validates: Requirements 6.3**
 
 ### Property 17: Function Return Value
 
-For any completed search_market_price function execution, it should return a result object containing item, location, price_range, and timestamp fields.
+For any completed web_search function execution, it should return a result object containing query, results, and timestamp fields.
 
 **Validates: Requirements 6.4**
 
@@ -944,17 +1258,17 @@ For any sequence of audio chunks sent to the backend, the time interval between 
 
 **Validates: Requirements 11.3**
 
-### Property 25: State Initialization
+### Property 25: Voice Enrollment Completion
 
-For any user-provided context input (item, target_price, max_price), the state manager should initialize a state object with these values in the correct fields and data types.
+For any successful voice enrollment session, the system should create a voice fingerprint with mean and variance vectors and transition to the negotiation screen within 1 second.
 
-**Validates: Requirements 12.2, 12.6**
+**Validates: Requirements 3.3, 3.5, 12.6, 12.7**
 
-### Property 26: Price Validation
+### Property 26: AI Context Extraction
 
-For any state initialization with target_price and max_price values, the system should validate that target_price ≤ max_price, and prompt for correction if validation fails.
+For any conversation transcript containing item and price information, the AI should extract and populate the state object fields (item, target_price, max_price) from the natural language conversation.
 
-**Validates: Requirements 12.4, 12.5**
+**Validates: Requirements 5.1, 5.2**
 
 ### Property 27: Connection Failure Error Display
 
@@ -976,7 +1290,7 @@ For any voice fingerprinting session where accuracy falls below 60%, the system 
 
 ### Property 30: Graceful Research Failure
 
-For any market research function call that fails, the system should continue operating and provide advice without market data rather than crashing.
+For any research function call that fails, the system should continue operating and provide advice without research data rather than crashing.
 
 **Validates: Requirements 14.4**
 
@@ -1076,18 +1390,18 @@ For any sequence of queued advice requests, the system should process them in FI
 - Use fallback state with minimal fields
 - Continue operation with degraded state
 
-### Market Research Errors
+### Research Errors
 
 **Function Call Timeout:**
-- Set 3-second timeout for search_market_price
+- Set 3-second timeout for web_search
 - If timeout occurs, return empty result
-- AI provides advice without market data
+- AI provides advice without research data
 - Log timeout for monitoring
 
 **Invalid Search Results:**
-- Validate returned price range format
+- Validate returned results format
 - If invalid, discard and continue
-- AI provides advice without market data
+- AI provides advice without research data
 - Log validation failure
 
 ### Audio Processing Errors
@@ -1201,8 +1515,7 @@ def test_state_serialization_roundtrip(state):
 - Enrollment prompt (Requirement 3.1)
 - Enrollment confirmation (Requirement 3.5)
 - Ask AI button exists (Requirement 8.1)
-- Context prompt after enrollment (Requirement 12.1)
-- Readiness confirmation (Requirement 12.3)
+- Transition to negotiation screen (Requirement 12.7)
 
 **Integration Tests:**
 - End-to-end button tap flow

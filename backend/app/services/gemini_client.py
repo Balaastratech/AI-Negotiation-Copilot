@@ -13,7 +13,7 @@ from fastapi import WebSocket
 
 from app.models.negotiation import NegotiationSession, NegotiationState
 from app.config import settings
-from app.services.master_prompt import MASTER_NEGOTIATION_PROMPT
+from app.services.master_prompt import MASTER_NEGOTIATION_PROMPT, ADVISOR_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -70,16 +70,21 @@ def build_advisor_query(state: dict, transcript: list = None) -> str:
     market_data = state.get('market_data', {})
     
     conversation_context = ""
-    if transcript and len(transcript) > 0:
-        recent = transcript[-10:] if len(transcript) > 10 else transcript
-        conversation_context = "Recent conversation:\n"
-        for entry in recent:
-            speaker = entry.get('speaker', 'Unknown')
-            text = entry.get('text', '')
-            conversation_context += f"{speaker}: {text}\n"
-        
-        if len(transcript) > 10:
-            conversation_context += f"\n(+ {len(transcript) - 10} earlier messages)"
+    if transcript:
+        if isinstance(transcript, str):
+            # Frontend already formatted it
+            conversation_context = "Recent conversation:\n" + transcript
+        elif isinstance(transcript, list) and len(transcript) > 0:
+            # Backend list format
+            recent = transcript[-10:] if len(transcript) > 10 else transcript
+            conversation_context = "Recent conversation:\n"
+            for entry in recent:
+                speaker = entry.get('speaker', 'Unknown')
+                text = entry.get('text', '')
+                conversation_context += f"{speaker}: {text}\n"
+            
+            if len(transcript) > 10:
+                conversation_context += f"\n(+ {len(transcript) - 10} earlier messages)"
     
     market_context = ""
     if market_data:
@@ -113,13 +118,15 @@ RESPOND WITH AUDIO: Speak your advice out loud. Be specific and actionable."""
 
 async def trigger_advice_response(live_session, state: dict, transcript: list = None) -> None:
     """
-    Trigger AI advice response by sending a special audio tone or text message.
+    Trigger AI advice response using the manual activity control sequence.
 
-    The Gemini Live API in AUDIO mode may not respond to text-only inputs.
-    We need to either:
-    1. Send a brief audio signal to trigger the response
-    2. Use the send() method with proper formatting
-    3. Rely on the system prompt to make AI proactive
+    Because VAD is DISABLED, Gemini will NOT respond to audio or text unless
+    we explicitly signal activity boundaries:
+
+        ActivityStart  →  (text query)  →  ActivityEnd
+
+    This is the ONLY way to get the AI to speak when VAD is off.
+    Ref: https://ai.google.dev/api/live#v1alpha.LiveClientActivityStart
 
     Args:
         live_session: Active Gemini Live API session
@@ -127,44 +134,33 @@ async def trigger_advice_response(live_session, state: dict, transcript: list = 
         transcript: List of transcript entries for context
 
     Raises:
-        Exception: If the message fails to send
+        Exception: If any step in the sequence fails
     """
-    # Build ADVISOR_QUERY from state with clear trigger marker
     query = build_advisor_query(state, transcript=transcript)
-    
+
     logger.info(f"Sending ADVISOR_QUERY to Gemini (length: {len(query)} chars)")
     logger.info(f"Query preview: {query[:200]}...")
 
-    # APPROACH 1: Try sending as text with end_of_turn
-    # This should work if the AI is configured to respond to text inputs
     try:
-        await live_session.send(query, end_of_turn=True)
-        logger.info("ADVISOR_QUERY sent via send() method, waiting for AI response...")
-        return
-    except Exception as e:
-        logger.warning(f"send() method failed: {e}, trying alternative...")
+        # The SDK source (live.py) shows activity_start / activity_end are
+        # keyword arguments of send_realtime_input(), NOT of send().
+        # Each call must have exactly ONE argument.
+        #
+        #   send_realtime_input(activity_start=...)  → tells Gemini: turn begins
+        #   send_realtime_input(text=...)            → the query text
+        #   send_realtime_input(activity_end=...)    → tells Gemini: respond now
 
-    # APPROACH 2: Try using tool_response format to trigger a response
-    try:
-        # Send as a realtime input with text
-        await live_session.send_realtime_input(
-            text=query,
-            end_of_turn=True
-        )
-        logger.info("ADVISOR_QUERY sent via send_realtime_input(), waiting for AI response...")
-        return
+        await live_session.send_realtime_input(activity_start=types.ActivityStart())
+        logger.info("ActivityStart sent")
+
+        await live_session.send_realtime_input(text=query)
+        logger.info("ADVISOR_QUERY text sent")
+
+        await live_session.send_realtime_input(activity_end=types.ActivityEnd())
+        logger.info("ActivityEnd sent — Gemini should now respond")
+
     except Exception as e:
-        logger.warning(f"send_realtime_input() failed: {e}, trying final approach...")
-    
-    # APPROACH 3: Fallback to send_client_content
-    try:
-        await live_session.send_client_content(
-            turns=[{"role": "user", "parts": [{"text": query}]}],
-            turn_complete=True
-        )
-        logger.info("ADVISOR_QUERY sent via send_client_content(), waiting for AI response...")
-    except Exception as e:
-        logger.error(f"All send methods failed: {e}")
+        logger.error(f"Activity control sequence failed: {e}")
         raise
 
 
@@ -408,52 +404,39 @@ class GeminiClient:
             )
         
         config = types.LiveConnectConfig(
-            # NOTE: Removing response_modalities to allow AI to choose response format
-            # This may enable the AI to respond to text queries with audio
-            system_instruction=build_system_prompt(context),
-            
-            # Generation config
-            generation_config=types.GenerationConfig(
-                temperature=1.0,  # Maximum creativity/responsiveness
-                max_output_tokens=500,
-                candidate_count=1,
-                top_p=0.95,  # Nucleus sampling for more varied responses
-                top_k=40  # Consider top 40 tokens
-            ),
-            
-            # Speech configuration - CRITICAL for audio output
+            system_instruction=ADVISOR_SYSTEM_PROMPT,
+
+            # ── VAD ENABLED with barge-in: AI can be interrupted naturally ──
+            # Removing the disabled VAD block so Gemini uses its native
+            # voice activity detection.  The system prompt keeps the AI
+            # SILENT by default — it only responds to the ADVISOR_QUERY trigger.
+            # Preemptible voice means the user talking will interrupt the AI.
+
+            # Audio-only responses (no text mode)
+            response_modalities=["AUDIO"],
+
+            # Speech configuration — preemptible = barge-in supported
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name="Puck"  # Or "Charon", "Kore", "Fenrir", "Aoede"
+                        voice_name="Aoede"
                     )
                 )
             ),
-            
-            # Enable transcriptions (separate from response modalities)
+
+            # Generation config — keep responses short and snappy
+            generation_config=types.GenerationConfig(
+                temperature=0.8,
+                max_output_tokens=300,
+                candidate_count=1,
+            ),
+
+            # Transcriptions
             input_audio_transcription=types.AudioTranscriptionConfig(),
             output_audio_transcription=types.AudioTranscriptionConfig(),
-            
-            # Register function calling tools
+
+            # Tools: Google Search grounding
             tools=[
-                types.Tool(
-                    function_declarations=[
-                        types.FunctionDeclaration(
-                            name="web_search",
-                            description="Search the web for any information needed to provide negotiation advice.",
-                            parameters={
-                                "type": "object",
-                                "properties": {
-                                    "query": {
-                                        "type": "string",
-                                        "description": "The search query"
-                                    }
-                                },
-                                "required": ["query"]
-                            }
-                        )
-                    ]
-                ),
                 types.Tool(google_search=types.GoogleSearch())
             ]
         )
@@ -521,7 +504,12 @@ class GeminiClient:
             blob = types.Blob(data=raw_pcm_bytes, mime_type="audio/pcm;rate=16000")
             await live_session.send_realtime_input(audio=blob)
         except Exception as e:
+            if "1007" in str(e) or "invalid frame payload data" in str(e) or "inputaudio" in str(e):
+                logger.error(f"1007 error — dropping chunk and continuing [{session_id}]: {e}")
+                # Don't re-raise — let next chunk try so the session doesn't die
+                return
             logger.error(f"Audio chunk send failed [{session_id}]: {e}")
+            raise
 
     @staticmethod
     async def receive_responses(live_session, websocket: WebSocket, session_id: str, session=None) -> None:
@@ -574,17 +562,25 @@ class GeminiClient:
 
                     if sc.interrupted:
                         logger.info(f"Interruption detected [{session_id}]")
+                        
+                        # Stop forwarding audio if user barges in
+                        if getattr(session, 'advisor_active', False):
+                            session.advisor_active = False
+                            
                         await websocket.send_json({"type": "AUDIO_INTERRUPTED", "payload": {}})
                         continue
 
                     if sc.model_turn:
                         for part in sc.model_turn.parts:
                             if part.inline_data and part.inline_data.mime_type.startswith("audio/pcm"):
-                                if isinstance(part.inline_data.data, str):
-                                    pcm_bytes = base64.b64decode(part.inline_data.data)
-                                else:
-                                    pcm_bytes = part.inline_data.data
-                                await websocket.send_bytes(pcm_bytes)
+                                # Only forward audio to frontend if the user requested advice
+                                if getattr(session, 'advisor_active', False):
+                                    if isinstance(part.inline_data.data, str):
+                                        pcm_bytes = base64.b64decode(part.inline_data.data)
+                                    else:
+                                        pcm_bytes = part.inline_data.data
+                                    await websocket.send_bytes(pcm_bytes)
+                                # Else drop the audio (prevents AI chatting randomly)
                             elif part.text:
                                 await handle_gemini_text(websocket, session_id, part.text)
                             elif hasattr(part, 'function_call') and part.function_call:
@@ -645,46 +641,37 @@ class GeminiClient:
                             "type": "AI_LISTENING",
                             "payload": {}
                         })
-                        
-                        # Extract state from transcript with correct speaker label
-                        await extract_state_from_transcript(
-                            websocket, 
-                            session_id, 
-                            speaker, 
-                            sc.input_transcription.text
-                        )
 
                     # Use output_transcription for Vertex AI
                     output_transcription = getattr(sc, 'output_transcription', None) or getattr(sc, 'output_audio_transcription', None)
                     if output_transcription and output_transcription.text:
-                        logger.info(f"✓ AI TRANSCRIPT: '{output_transcription.text}' [{session_id}]")
-                        # AI is speaking
-                        await websocket.send_json({
-                            "type": "AI_SPEAKING",
-                            "payload": {}
-                        })
-                        await websocket.send_json({
-                            "type": "TRANSCRIPT_UPDATE",
-                            "payload": {
-                                "speaker": "ai",
-                                "text": output_transcription.text,
-                                "timestamp": int(time.time() * 1000)
-                            }
-                        })
-                        
-                        # Extract state from AI transcript (counterparty)
-                        await extract_state_from_transcript(
-                            websocket, 
-                            session_id, 
-                            "counterparty", 
-                            output_transcription.text
-                        )
+                        # Only forward text to frontend if the user requested advice
+                        if getattr(session, 'advisor_active', False):
+                            logger.info(f"✓ AI TRANSCRIPT: '{output_transcription.text}' [{session_id}]")
+                            # AI is speaking
+                            await websocket.send_json({
+                                "type": "AI_SPEAKING",
+                                "payload": {}
+                            })
+                            await websocket.send_json({
+                                "type": "TRANSCRIPT_UPDATE",
+                                "payload": {
+                                    "speaker": "ai",
+                                    "text": output_transcription.text,
+                                    "timestamp": int(time.time() * 1000)
+                                }
+                            })
 
                     # Check for turn_complete - this signals the end of this receive() iteration
                     if hasattr(sc, 'turn_complete') and sc.turn_complete:
                         turn_complete_received = True
                         turn_count += 1
                         logger.info(f"✓ Turn {turn_count} complete ({turn_response_count} responses, {total_responses} total) [{session_id}]")
+                        
+                        # Reset advisor_active to stop listening to microphone when AI is done
+                        if getattr(session, 'advisor_active', False):
+                            session.advisor_active = False
+                            
                         # Turn complete means AI finished speaking, now listening for next input
                         await websocket.send_json({
                             "type": "AI_LISTENING",

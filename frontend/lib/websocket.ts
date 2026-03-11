@@ -115,7 +115,11 @@ export class NegotiationWebSocket {
    */
   sendControl(type: string, payload: any): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type, payload }));
+      const message = { type, payload };
+      console.log(`[WebSocket] Sending control message:`, message);
+      this.ws.send(JSON.stringify(message));
+    } else {
+      console.warn(`[WebSocket] Cannot send ${type} - WebSocket not open (readyState: ${this.ws?.readyState})`);
     }
   }
 
@@ -132,5 +136,14 @@ export class NegotiationWebSocket {
   onError(listener: (error: any) => void): () => void {
     this.errorListeners.add(listener);
     return () => this.errorListeners.delete(listener);
+  }
+
+  /**
+   * Resume audio contexts (needed after user gestures to prevent corrupted frames)
+   */
+  async resumeAudioContexts(): Promise<void> {
+    if (this.audioManager) {
+      await this.audioManager.resumeContexts();
+    }
   }
 }

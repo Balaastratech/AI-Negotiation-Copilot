@@ -46,7 +46,11 @@ async def websocket_endpoint(websocket: WebSocket):
                     data = json.loads(message["text"])
                     msg_type = data.get("type", "UNKNOWN")
                     
-                    logger.debug(f"Received message type: {msg_type} [session={session_id}]")
+                    # Log SPEAKER_IDENTIFIED messages explicitly
+                    if msg_type == "SPEAKER_IDENTIFIED":
+                        logger.info(f"🔍 SPEAKER_IDENTIFIED message received: {data.get('payload')} [session={session_id}]")
+                    else:
+                        logger.debug(f"Received message type: {msg_type} [session={session_id}]")
                     
                     if not await NegotiationEngine.validate_message(websocket, session, msg_type):
                         continue

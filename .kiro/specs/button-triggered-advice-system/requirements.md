@@ -22,7 +22,7 @@ The system enables hands-free negotiation where both the user and counterparty c
 - **Enrollment_Phase**: Initial setup where the user's voice is recorded to create their voice fingerprint
 - **Silent_Listening_Mode**: Operating state where the AI receives audio but does not respond
 - **Active_Response_Mode**: Operating state where the AI generates and delivers advice
-- **Market_Research_Function**: Function callable by AI to search for current market prices
+- **Research_Function**: Function callable by AI to search for any information it determines is needed for negotiation advice
 - **Transcript**: Text record of the conversation with speaker labels
 
 ## Requirements
@@ -63,7 +63,8 @@ The system enables hands-free negotiation where both the user and counterparty c
 3. WHEN MFCC extraction completes, THE Negotiation_Copilot SHALL calculate and store the mean and variance of the features as the Voice_Fingerprint
 4. THE Voice_Fingerprint SHALL contain at least 13 MFCC coefficients per frame
 5. WHEN enrollment completes, THE Negotiation_Copilot SHALL confirm successful voice capture to the user
-6. FOR ALL valid audio samples during enrollment, MFCC extraction SHALL complete within 2 seconds
+6. WHEN voice capture is confirmed, THE Negotiation_Copilot SHALL transition directly to Silent_Listening_Mode
+7. FOR ALL valid audio samples during enrollment, MFCC extraction SHALL complete within 2 seconds
 
 ### Requirement 4: Real-Time Speaker Identification
 
@@ -80,29 +81,29 @@ The system enables hands-free negotiation where both the user and counterparty c
 
 ### Requirement 5: Negotiation State Management
 
-**User Story:** As a negotiator, I want the system to track key negotiation details, so that the AI can provide contextually relevant advice.
+**User Story:** As a negotiator, I want the system to track key negotiation details extracted from the conversation, so that the AI can provide contextually relevant advice.
 
 #### Acceptance Criteria
 
 1. THE State_Manager SHALL maintain a state object containing item, seller_price, target_price, max_price, market_data, and transcript fields
-2. WHEN a price is mentioned in the transcript, THE State_Manager SHALL update the corresponding price field
+2. WHEN the AI analyzes the transcript, THE State_Manager SHALL extract and update item details and prices from the conversation
 3. WHEN the "Ask AI" button is tapped, THE State_Manager SHALL include the complete state object in the ADVISOR_QUERY
 4. WHEN market research completes, THE State_Manager SHALL update the market_data field with price ranges
 5. THE State_Manager SHALL retain the last 90 seconds of transcript in the state object
 6. FOR ALL state updates, the state object SHALL remain valid JSON
 
-### Requirement 6: Market Research Function Calling
+### Requirement 6: Autonomous Research Function Calling
 
-**User Story:** As a negotiator, I want the AI to autonomously research market prices when needed, so that I receive data-driven advice without manual lookups.
+**User Story:** As a negotiator, I want the AI to autonomously research any information it needs, so that I receive data-driven advice without manual lookups.
 
 #### Acceptance Criteria
 
-1. THE Negotiation_Copilot SHALL register a search_market_price function with Gemini_Live_API
-2. WHEN the AI determines market research is needed, THE Negotiation_Copilot SHALL execute the search_market_price function
-3. WHEN search_market_price is called, THE Negotiation_Copilot SHALL pass the item name and location as parameters
-4. WHEN market research completes, THE Negotiation_Copilot SHALL return price range data to the AI
-5. THE search_market_price function SHALL complete within 3 seconds
-6. FOR ALL function calls, the AI SHALL autonomously decide when to trigger research based on conversation context
+1. THE Negotiation_Copilot SHALL register a web_search function with Gemini_Live_API
+2. WHEN the AI determines research is needed, THE Negotiation_Copilot SHALL execute the web_search function with a self-constructed query
+3. WHEN web_search is called, THE Negotiation_Copilot SHALL pass the search query as a parameter
+4. WHEN research completes, THE Negotiation_Copilot SHALL return search results to the AI
+5. THE web_search function SHALL complete within 3 seconds
+6. FOR ALL function calls, the AI SHALL autonomously decide what to search for and when to trigger research based on conversation context
 
 ### Requirement 7: Structured Advice Response
 
@@ -114,7 +115,7 @@ The system enables hands-free negotiation where both the user and counterparty c
 2. WHEN generating advice, THE Negotiation_Copilot SHALL limit responses to 150 tokens maximum
 3. WHEN advice is delivered, THE Negotiation_Copilot SHALL use audio output modality
 4. THE Negotiation_Copilot SHALL generate advice responses within 5 seconds of receiving ADVISOR_QUERY
-5. WHEN advice includes market data, THE Negotiation_Copilot SHALL cite specific price ranges
+5. WHEN advice includes research data, THE Negotiation_Copilot SHALL cite specific findings
 6. FOR ALL advice responses, the content SHALL be relevant to the current negotiation state
 
 ### Requirement 8: User Interface Controls
@@ -169,18 +170,20 @@ The system enables hands-free negotiation where both the user and counterparty c
 5. WHEN audio streaming errors occur, THE Negotiation_Copilot SHALL attempt reconnection within 2 seconds
 6. FOR ALL audio streams, the format SHALL remain consistent throughout the session
 
-### Requirement 12: Context Initialization
+### Requirement 12: Voice Enrollment User Interface
 
-**User Story:** As a negotiator, I want to provide initial negotiation context, so that the AI understands my goals from the beginning.
+**User Story:** As a negotiator, I want a clear and guided voice enrollment experience, so that I can quickly set up the system and start negotiating.
 
 #### Acceptance Criteria
 
-1. WHEN the Enrollment_Phase completes, THE Negotiation_Copilot SHALL prompt the user for negotiation item and target price
-2. WHEN the user provides context, THE State_Manager SHALL initialize the state object with item, target_price, and max_price fields
-3. WHEN context initialization completes, THE Negotiation_Copilot SHALL confirm readiness and enter Silent_Listening_Mode
-4. THE Negotiation_Copilot SHALL validate that target_price is less than or equal to max_price
-5. WHEN validation fails, THE Negotiation_Copilot SHALL prompt the user to correct the values
-6. FOR ALL context inputs, the State_Manager SHALL store values in the correct data types
+1. WHEN the user opens the app, THE Negotiation_Copilot SHALL display a "Voice Setup" screen
+2. THE "Voice Setup" screen SHALL display the instruction "Speak for 3 seconds so I can learn your voice"
+3. WHEN recording begins, THE Negotiation_Copilot SHALL display a red recording indicator dot
+4. WHILE recording, THE Negotiation_Copilot SHALL display a countdown timer showing "3...2...1"
+5. WHEN recording completes, THE Negotiation_Copilot SHALL display a "Processing..." spinner
+6. WHEN voice fingerprint is successfully created, THE Negotiation_Copilot SHALL display "✓ Voice captured!" confirmation
+7. WHEN confirmation is displayed, THE Negotiation_Copilot SHALL transition to the negotiation screen within 1 second
+8. FOR ALL enrollment sessions, the UI SHALL provide clear visual feedback at each step
 
 ### Requirement 13: Response Latency Optimization
 
@@ -204,7 +207,7 @@ The system enables hands-free negotiation where both the user and counterparty c
 1. WHEN Gemini_Live_API connection fails, THE Negotiation_Copilot SHALL display an error message to the user
 2. WHEN connection fails, THE Negotiation_Copilot SHALL attempt automatic reconnection up to 3 times
 3. WHEN voice fingerprinting accuracy is below 60%, THE Negotiation_Copilot SHALL warn the user and suggest manual labeling
-4. WHEN market research fails, THE Negotiation_Copilot SHALL provide advice without market data
+4. WHEN research fails, THE Negotiation_Copilot SHALL provide advice without research data
 5. WHEN audio streaming is interrupted, THE Negotiation_Copilot SHALL resume from the interruption point
 6. FOR ALL errors, THE Negotiation_Copilot SHALL log error details for debugging
 
