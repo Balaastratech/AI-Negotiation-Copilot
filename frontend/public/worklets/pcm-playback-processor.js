@@ -8,7 +8,8 @@ class PCMPlaybackProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     this._queue = [];
-    this._maxQueueBytes = 24000 * 2 * 3; // max 3 seconds of audio buffered
+    // Increase max buffer to 60 seconds to handle fast AI generation
+    this._maxQueueBytes = 24000 * 2 * 60; // max 60 seconds of audio buffered
     this._minBufferSamples = 1200; // 50ms minimum buffer - start playing quickly
     this._isPlaying = false;
     this._silenceFrames = 0;

@@ -10,7 +10,7 @@ export interface NegotiationState {
   user_offer: number | null;
   target_price: number;
   max_price: number;
-  market_data: string | null;
+  market_data: any;
   transcript: TranscriptEntry[];
   isResearching: boolean;
   researchProgress: string | null;

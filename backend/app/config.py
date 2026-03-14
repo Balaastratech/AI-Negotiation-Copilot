@@ -12,7 +12,7 @@ class Config(BaseSettings):
     
     # Advanced capabilities
     ENABLE_AFFECTIVE_DIALOG: bool = True
-    ENABLE_PROACTIVE_AUDIO: bool = True
+   
     
     # Credentials path
     GOOGLE_APPLICATION_CREDENTIALS: str = ""

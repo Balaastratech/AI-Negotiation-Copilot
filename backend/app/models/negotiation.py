@@ -30,14 +30,37 @@ class NegotiationSession(BaseModel):
     live_session: Optional[Any] = None
     # Async context manager returned by open_live_session – kept so __aexit__ can be called on end
     live_session_cm: Optional[Any] = None
+    # API key stored for auto-reconnect on 1007 codec errors
+    api_key: Optional[str] = None
 
     # Dual-Model: rolling audio buffer (shared between audio sender & listener)
     audio_buffer: Optional[Any] = None
     # Dual-Model: background listener agent task
     listener_agent: Optional[Any] = None
 
-    # Flag strictly gating the Advisor's audio output (prevents random talking)
-    advisor_active: bool = False
+    # Flag — True only during deliberate long-press window; gates mic audio to Live AI
+    user_addressing_ai: bool = False
+    # Flag — True after user presses Start Copilot; persists for the whole negotiation
+    copilot_active: bool = False
+    
+    # AI speaking state - used to pause intel injections while AI is generating audio
+    ai_is_speaking: bool = False
+    # Queue for intel injections that were skipped while AI was speaking
+    pending_injections: list = Field(default_factory=list)
+    
+    # Stores the last transcribed text from the user's direct address to the AI
+    last_user_transcript: str = ""
+    # Set True when user releases long-press so receive_responses knows the next
+    # turn_complete is from a direct user query — prevents flush_pending_injections
+    # from firing and triggering a second proactive AI response.
+    direct_query_in_flight: bool = False
+    
+    # Accumulates AI response text for validation at turn_complete
+    current_ai_response: str = ""
+
+    # Response mode for AI responses (set by Get Advice / Get Command buttons)
+    # "advice" = skip validation, "command" = apply validation
+    response_mode: str = "command"
 
     # Context submitted via the SetupDialog (item, target_price, max_price, extra_context)
     user_context: dict = Field(default_factory=dict)

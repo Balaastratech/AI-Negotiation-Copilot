@@ -41,7 +41,7 @@ npm-debug.log
 yarn-error.log
 package-lock.json
 
-# Next.js / React (if applicable)
+# Next.js / React
 .next/
 out/
 build/
@@ -68,7 +68,25 @@ Thumbs.db
 .opencode/
 .git/index.lock
 skills-lock.json
-
 .rules
 OPENCODE.md
 
+# Logs
+*.log
+*.log.*
+backend/logs/
+localhost-*.log
+
+# Planning / internal docs
+.planning/
+.claude/
+log_back.md
+promp.md
+
+# Misc generated files
+pyright.txt
+web_serach_implimention
+FEEDBACK_LOOP_FIX.md
+GEMINI_FIX_IMPLEMENTATION.md
+backend/pyrightconfig.json
+backend/test_validator.py

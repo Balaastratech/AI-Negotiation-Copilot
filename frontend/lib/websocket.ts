@@ -1,9 +1,11 @@
 import { AudioWorkletManager } from './audio-worklet-manager';
+import logger from '../utils/logger';
+import { v4 as uuidv4 } from 'uuid';
 
 /**
  * NegotiationWebSocket
  * Bridges the AudioWorkletManager streams with the backend WebSocket.
- * 
+ *
  * Handles bidirectional separation of text (JSON control signals)
  * and binary (raw PCM audio) frames.
  */
@@ -15,6 +17,7 @@ export class NegotiationWebSocket {
   private closeListeners: Set<() => void> = new Set();
   private errorListeners: Set<(error: any) => void> = new Set();
   private pendingConnection: { resolve: () => void, reject: (reason?: any) => void } | null = null;
+  private correlationId: string = '';
 
   constructor(url: string, audioManager: AudioWorkletManager) {
     this.url = url;
@@ -37,6 +40,9 @@ export class NegotiationWebSocket {
       return Promise.resolve();
     }
 
+    this.correlationId = uuidv4();
+    logger.info({ correlationId: this.correlationId }, 'WebSocket connecting');
+
     return new Promise((resolve, reject) => {
       this.pendingConnection = { resolve, reject };
       this.ws = new WebSocket(this.url);
@@ -45,6 +51,7 @@ export class NegotiationWebSocket {
       this.ws.binaryType = 'arraybuffer';
 
       this.ws.onopen = () => {
+        logger.info({ correlationId: this.correlationId }, 'WebSocket connected');
         if (this.pendingConnection) {
           this.pendingConnection.resolve();
           this.pendingConnection = null;
@@ -52,6 +59,7 @@ export class NegotiationWebSocket {
       };
 
       this.ws.onerror = (error) => {
+        logger.error({ correlationId: this.correlationId, error }, 'WebSocket error');
         if (this.pendingConnection) {
           this.pendingConnection.reject(error);
           this.pendingConnection = null;
@@ -62,6 +70,7 @@ export class NegotiationWebSocket {
       };
 
       this.ws.onclose = () => {
+        logger.info({ correlationId: this.correlationId }, 'WebSocket closed');
         if (this.pendingConnection) {
           this.pendingConnection.reject(new Error('WebSocket closed before connection established'));
           this.pendingConnection = null;
@@ -72,6 +81,7 @@ export class NegotiationWebSocket {
       this.ws.onmessage = (event: MessageEvent) => {
         if (event.data instanceof ArrayBuffer || event.data instanceof Blob) {
           // BINARY frame = PCM audio from Gemini (24kHz Int16)
+          logger.debug({ correlationId: this.correlationId, size: event.data.byteLength }, 'WebSocket received binary message');
           if (event.data instanceof Blob) {
             event.data.arrayBuffer().then(buf => this.audioManager.playChunk(buf));
           } else {
@@ -81,9 +91,10 @@ export class NegotiationWebSocket {
           // TEXT frame = JSON control message
           try {
             const message = JSON.parse(event.data as string);
+            logger.debug({ correlationId: this.correlationId, message }, 'WebSocket received text message');
             this.messageListeners.forEach(listener => listener(message));
           } catch (e) {
-            console.error('Failed to parse WebSocket message:', e);
+            logger.error({ correlationId: this.correlationId, error: e }, 'Failed to parse WebSocket message');
           }
         }
       };
@@ -106,7 +117,10 @@ export class NegotiationWebSocket {
    */
   sendAudioChunk(buffer: ArrayBuffer): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      logger.debug({ correlationId: this.correlationId, size: buffer.byteLength }, 'WebSocket sending audio chunk');
       this.ws.send(buffer);
+    } else {
+      logger.warn({ correlationId: this.correlationId }, 'WebSocket not open, cannot send audio');
     }
   }
 
@@ -114,12 +128,14 @@ export class NegotiationWebSocket {
    * Send a standard JSON control message (e.g. strategy choices, start commands)
    */
   sendControl(type: string, payload: any): void {
+    console.log('[WebSocket] sendControl called:', type, payload);
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       const message = { type, payload };
-      console.log(`[WebSocket] Sending control message:`, message);
+      console.log('[WebSocket] Sending:', JSON.stringify(message));
+      logger.debug({ correlationId: this.correlationId, message }, 'WebSocket sending control message');
       this.ws.send(JSON.stringify(message));
     } else {
-      console.warn(`[WebSocket] Cannot send ${type} - WebSocket not open (readyState: ${this.ws?.readyState})`);
+      logger.warn({ correlationId: this.correlationId, type }, `Cannot send ${type} - WebSocket not open (readyState: ${this.ws?.readyState})`);
     }
   }
 

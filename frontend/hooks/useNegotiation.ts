@@ -22,7 +22,10 @@ type Action =
     | { type: 'SET_OUTCOME'; payload: OutcomeSummary }
     | { type: 'SET_ERROR'; payload: string | null }
     | { type: 'SET_DEGRADED'; payload: boolean }
-    | { type: 'SET_AI_STATE'; payload: 'idle' | 'listening' | 'thinking' | 'speaking' };
+    | { type: 'SET_AI_STATE'; payload: 'idle' | 'connecting' | 'connected' | 'listening' | 'thinking' | 'speaking' }
+    | { type: 'SET_COPILOT_ACTIVE'; payload: boolean }
+    | { type: 'SET_RESPONSE_MODE'; payload: 'advice' | 'command' | null }
+    | { type: 'SET_AI_LIVE_TRANSCRIPTION'; payload: string | null };
 
 function negotiationReducer(state: NegotiationState, action: Action): NegotiationState {
     switch (action.type) {
@@ -35,7 +38,32 @@ function negotiationReducer(state: NegotiationState, action: Action): Negotiatio
         case 'SET_SESSION_ID':
             return { ...state, sessionId: action.payload };
         case 'APPEND_TRANSCRIPT':
-            return { ...state, transcript: [...state.transcript, action.payload] };
+            const newEntry = action.payload;
+            const lastEntry = state.transcript[state.transcript.length - 1];
+            
+            // Merge consecutive messages from the same speaker if they arrived within 30 seconds
+            // This prevents the AI's streaming response from creating 50 separate chat bubbles
+            if (
+                lastEntry && 
+                lastEntry.speaker === newEntry.speaker && 
+                (newEntry.timestamp - lastEntry.timestamp) < 30000
+            ) {
+                // Ensure a space between segments if needed
+                const separator = (lastEntry.text.endsWith(' ') || newEntry.text.startsWith(' ')) ? '' : ' ';
+                
+                const updatedLastEntry = {
+                    ...lastEntry,
+                    text: lastEntry.text + separator + newEntry.text,
+                    timestamp: newEntry.timestamp // refresh timestamp to extend the window
+                };
+                
+                return { 
+                    ...state, 
+                    transcript: [...state.transcript.slice(0, -1), updatedLastEntry] 
+                };
+            }
+            
+            return { ...state, transcript: [...state.transcript, newEntry] };
         case 'SET_STRATEGY':
             return { ...state, strategy: action.payload };
         case 'SET_OUTCOME':
@@ -46,6 +74,12 @@ function negotiationReducer(state: NegotiationState, action: Action): Negotiatio
             return { ...state, aiDegraded: action.payload };
         case 'SET_AI_STATE':
             return { ...state, aiState: action.payload };
+        case 'SET_COPILOT_ACTIVE':
+            return { ...state, copilotActive: action.payload };
+        case 'SET_RESPONSE_MODE':
+            return { ...state, responseMode: action.payload };
+        case 'SET_AI_LIVE_TRANSCRIPTION':
+            return { ...state, aiLiveTranscription: action.payload };
         default:
             return state;
     }
@@ -96,10 +130,17 @@ export function useNegotiation() {
                     break;
                 case 'SESSION_STARTED':
                     dispatch({ type: 'SET_NEGOTIATING', payload: true });
-                    dispatch({ type: 'SET_AI_STATE', payload: 'listening' });
+                    dispatch({ type: 'SET_AI_STATE', payload: 'connected' });
+                    // Brief "Connected" flash, then switch to listening
+                    setTimeout(() => dispatch({ type: 'SET_AI_STATE', payload: 'listening' }), 2000);
+                    break;
+                case 'AI_CONNECTING':
+                    dispatch({ type: 'SET_AI_STATE', payload: 'connecting' });
                     break;
                 case 'AI_LISTENING':
                     dispatch({ type: 'SET_AI_STATE', payload: 'listening' });
+                    // Clear live AI transcription when AI finishes speaking
+                    dispatch({ type: 'SET_AI_LIVE_TRANSCRIPTION', payload: null });
                     break;
                 case 'AI_THINKING':
                     dispatch({ type: 'SET_AI_STATE', payload: 'thinking' });
@@ -109,13 +150,7 @@ export function useNegotiation() {
                     break;
                 case 'TRANSCRIPT_UPDATE':
                     dispatch({ type: 'APPEND_TRANSCRIPT', payload: msg.payload as TranscriptEntry });
-                    // When user speaks, AI is listening
                     const transcriptPayload = msg.payload as TranscriptEntry;
-                    if (transcriptPayload.speaker === 'user') {
-                        dispatch({ type: 'SET_AI_STATE', payload: 'listening' });
-                    }
-                    // Fire window event so negotiationState can accumulate conversation history.
-                    // This feeds the transcript into ADVISOR_QUERY when Ask AI is pressed.
                     window.dispatchEvent(new CustomEvent('negotiation-transcript', {
                         detail: { speaker: transcriptPayload.speaker, text: (transcriptPayload as any).text || '' }
                     }));
@@ -154,6 +189,12 @@ export function useNegotiation() {
                         detail: msg.payload
                     }));
                     break;
+                case 'RESEARCH_STARTED':
+                    console.log('RESEARCH_STARTED received:', msg.payload);
+                    window.dispatchEvent(new CustomEvent('market-research-started', {
+                        detail: msg.payload
+                    }));
+                    break;
                 case 'RESEARCH_COMPLETE':
                     // Market research completed
                     console.log('RESEARCH_COMPLETE received:', msg.payload);
@@ -178,6 +219,18 @@ export function useNegotiation() {
                         (audioManagerRef.current as any).clearQueue();
                     }
                     dispatch({ type: 'SET_AI_STATE', payload: 'listening' });
+                    break;
+                case 'COPILOT_STARTED':
+                    dispatch({ type: 'SET_COPILOT_ACTIVE', payload: true });
+                    console.log('[Copilot] Proactive monitoring mode activated');
+                    break;
+                case 'RESPONSE_MODE_SET':
+                    const modePayload = msg.payload as { mode: 'advice' | 'command' };
+                    dispatch({ type: 'SET_RESPONSE_MODE', payload: modePayload.mode });
+                    console.log('[Copilot] Response mode set to:', modePayload.mode);
+                    break;
+                case 'AI_TRANSCRIPTION_DISPLAY':
+                    // disabled
                     break;
                 case 'SESSION_RECONNECTING':
                     dispatch({ type: 'SET_ERROR', payload: 'Reconnecting to AI...' });
@@ -226,17 +279,13 @@ export function useNegotiation() {
                 wsRef.current?.sendAudioChunk(chunk);
             },
             onSilence: () => {
-                // User stopped speaking - AI is thinking
-                dispatch({ type: 'SET_AI_STATE', payload: 'thinking' });
                 wsRef.current?.sendControl('SPEAKER_STOPPED', {});
             },
             onSpeech: () => {
-                // User started speaking - AI is listening
-                dispatch({ type: 'SET_AI_STATE', payload: 'listening' });
+                // local VAD — do not change AI state indicator
             },
             onSpeakerIdentified: (_result) => {
-                // TEMPORARILY DISABLED: Allow manual speaker toggle to control speaker exclusively
-                // without auto-identification overriding it
+                // TEMPORARILY DISABLED
             }
         });
 
@@ -273,6 +322,16 @@ export function useNegotiation() {
         });
     }, []);
 
+    const startCopilot = useCallback(() => {
+        console.log('[Copilot] Starting proactive monitoring mode');
+        wsRef.current?.sendControl('START_COPILOT', {});
+    }, []);
+
+    const setUserAddressingAI = useCallback((active: boolean) => {
+        console.log(`[Copilot] User addressing AI: ${active}`);
+        wsRef.current?.sendControl('USER_ADDRESSING_AI', { active });
+    }, []);
+
     return {
         state,
         connect,
@@ -282,6 +341,9 @@ export function useNegotiation() {
         endNegotiation,
         sendFrame,
         setManualSpeaker,
-        websocket: wsRef.current
+        startCopilot,
+        setUserAddressingAI,
+        websocket: wsRef.current,
+        aiLiveTranscription: state.aiLiveTranscription
     };
 }

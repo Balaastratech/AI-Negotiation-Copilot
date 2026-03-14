@@ -27,20 +27,11 @@ export function useAskAI(
   const [isLoading, setIsLoading] = useState(false);
 
   /**
-   * Ask AI for advice based on current negotiation state.
+   * Ask AI for advice or command based on current negotiation state.
    * 
-   * Workflow:
-   * 1. Validate websocket is available
-   * 2. Set loading state to true
-   * 3. Trigger research state updates
-   * 4. Bundle complete state object
-   * 5. Format transcript as string
-   * 6. Send ASK_ADVICE message to backend
-   * 
-   * Loading state will be cleared when AI response starts
-   * (handled by parent component listening to AI_SPEAKING event)
+   * @param mode - "advice" for full response, "command" for validated response
    */
-  const askAI = useCallback(async () => {
+  const askAI = useCallback(async (mode: 'advice' | 'command' = 'advice') => {
     // Check if websocket is available
     if (!websocket || !websocket.isConnected) {
       console.error('Cannot ask AI: WebSocket not connected');
@@ -73,6 +64,7 @@ export function useAskAI(
 
       // Bundle state and send ASK_ADVICE message
       websocket.sendControl('ASK_ADVICE', {
+        response_mode: mode,
         state: {
           item: state.item,
           seller_price: state.seller_price,

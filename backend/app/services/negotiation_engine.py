@@ -15,6 +15,7 @@ from app.services.gemini_client import (
     send_audio_chunk,
     receive_responses,
     monitor_session_lifetime,
+    keepalive_ping,
     handle_gemini_text,
 )
 from app.services.audio_buffer import AudioBuffer
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 VALID_MESSAGES: Dict[NegotiationState, list[str]] = {
     NegotiationState.IDLE:      ["PRIVACY_CONSENT_GRANTED"],
     NegotiationState.CONSENTED: ["START_NEGOTIATION"],
-    NegotiationState.ACTIVE:    ["VISION_FRAME", "AUDIO_CHUNK", "END_NEGOTIATION", "STATE_UPDATE", "ASK_ADVICE", "SPEAKER_IDENTIFIED", "SPEAKER_STOPPED"],
+    NegotiationState.ACTIVE:    ["VISION_FRAME", "AUDIO_CHUNK", "END_NEGOTIATION", "STATE_UPDATE", "ASK_ADVICE", "SPEAKER_IDENTIFIED", "SPEAKER_STOPPED", "USER_ADDRESSING_AI", "START_COPILOT", "SET_RESPONSE_MODE"],
     NegotiationState.ENDING:    [],
 }
 
@@ -47,6 +48,7 @@ class NegotiationEngine:
         message_type: str
     ) -> bool:
         allowed = VALID_MESSAGES.get(session.state, [])
+        logger.info(f"Validating message: {message_type}, state: {session.state}, allowed: {allowed}")
         if message_type not in allowed:
             # Silently drop early audio chunks to prevent log spam and frontend errors
             if message_type == "AUDIO_CHUNK" and session.state in (NegotiationState.IDLE, NegotiationState.CONSENTED):
@@ -69,7 +71,10 @@ class NegotiationEngine:
     ) -> None:
         old_state = session.state
         session.state = new_state
-        logger.info(f"State: {old_state} → {new_state} [session={session.session_id}]")
+        logger.info(
+            f"State transition",
+            extra={"old_state": old_state.value, "new_state": new_state.value, "session_id": session.session_id},
+        )
         
         # Broadcast state transition to frontend
         await websocket.send_json({
@@ -100,23 +105,72 @@ class NegotiationEngine:
         user_context = payload.get("user_context", {})
         session.context = context
         session.user_context = user_context
+        session.api_key = api_key  # stored for auto-reconnect on 1007
+
+        logger.info(
+            "Starting new negotiation",
+            extra={
+                "session_id": session.session_id,
+                "context": context,
+                "user_context": user_context,
+            },
+        )
 
         await NegotiationEngine.transition_state(session, NegotiationState.ACTIVE, websocket)
+
+        # Send "connecting" message to frontend so they know we're working on it
+        try:
+            await websocket.send_json({
+                "type": "AI_CONNECTING",
+                "payload": {"message": "Connecting to AI advisor..."}
+            })
+        except Exception:
+            logger.warning(f"Failed to send AI_CONNECTING message (WebSocket may be closed)")
+            # Don't fail here - continue trying to connect
 
         try:
             live_session_cm = open_live_session(api_key=api_key, context=context)
             session.live_session_cm = live_session_cm
-            session.live_session = await live_session_cm.__aenter__()
+            
+            # Add timeout to prevent hanging forever - increased to 60s for slower connections
+            try:
+                logger.info(f"Attempting to establish Gemini Live connection [session={session.session_id}]")
+                session.live_session = await asyncio.wait_for(
+                    live_session_cm.__aenter__(),
+                    timeout=60.0  # 60 second timeout (increased from 30s)
+                )
+                logger.info(f"Gemini Live connection established successfully [session={session.session_id}]")
+            except asyncio.TimeoutError:
+                logger.error(f"Gemini Live session connection timed out after 60s [session={session.session_id}]")
+                await websocket.send_json({
+                    "type": "ERROR",
+                    "payload": {"code": "CONNECTION_TIMEOUT", "message": "AI connection timed out. Please check your network and try again."}
+                })
+                await NegotiationEngine.transition_state(session, NegotiationState.IDLE, websocket)
+                return
+            except Exception as e:
+                logger.error(f"Failed to establish Gemini Live connection: {e} [session={session.session_id}]", exc_info=True)
+                await websocket.send_json({
+                    "type": "ERROR",
+                    "payload": {"code": "CONNECTION_FAILED", "message": f"AI connection failed: {str(e)}"}
+                })
+                await NegotiationEngine.transition_state(session, NegotiationState.IDLE, websocket)
+                return
 
             # ── Dual-Model: initialise buffer + listener ─────────────────────
             audio_buffer = AudioBuffer(max_seconds=90)
             session.audio_buffer = audio_buffer
 
+            # C4e — Async callback: forwards every ListenerAgent cycle to Live AI injector
+            async def _context_ready_handler(ctx, evts):
+                await NegotiationEngine._inject_context_to_live_ai(session, ctx, evts)
+
             listener = ListenerAgent(
-                session_id=session.session_id,
+                session=session,
                 audio_buffer=audio_buffer,
                 gemini_send_lock=session.gemini_send_lock,
                 websocket=websocket,
+                on_context_ready=_context_ready_handler,
             )
             session.listener_agent = listener
             listener.start()
@@ -124,50 +178,84 @@ class NegotiationEngine:
 
             asyncio.create_task(receive_responses(session.live_session, websocket, session.session_id, session))
             asyncio.create_task(monitor_session_lifetime(session, websocket, api_key))
+            asyncio.create_task(keepalive_ping(session))
 
-            await websocket.send_json({
-                "type": "SESSION_STARTED",
-                "payload": {
-                    "session_id": session.session_id,
-                    "model": settings.GEMINI_MODEL,
-                    "features": {
-                        "audio": True,
-                        "vision": True,
-                        "web_search": True,
-                        "dual_model": True,
+            # Try to send SESSION_STARTED, but handle WebSocket disconnect gracefully
+            try:
+                await websocket.send_json({
+                    "type": "SESSION_STARTED",
+                    "payload": {
+                        "session_id": session.session_id,
+                        "model": settings.GEMINI_MODEL,
+                        "features": {
+                            "audio": True,
+                            "vision": True,
+                            "web_search": True,
+                            "dual_model": True,
+                        }
                     }
-                }
-            })
+                })
+            except Exception as ws_error:
+                logger.warning(
+                    f"Failed to send SESSION_STARTED (WebSocket closed): {ws_error} "
+                    f"[session={session.session_id}]"
+                )
+                # WebSocket is closed, clean up the Gemini session
+                if session.listener_agent:
+                    await session.listener_agent.stop()
+                    session.listener_agent = None
+                if session.live_session_cm:
+                    try:
+                        await session.live_session_cm.__aexit__(None, None, None)
+                    except Exception:
+                        pass
+                    session.live_session = None
+                raise  # Re-raise to trigger outer exception handler
+                
         except Exception as e:
-            logger.error(f"Failed to start Gemini session: {e}", exc_info=True)
-            await websocket.send_json({
-                "type": "ERROR",
-                "payload": {"code": "GEMINI_UNAVAILABLE", "message": "AI service unavailable. Please try again."}
-            })
-            await NegotiationEngine.transition_state(session, NegotiationState.IDLE, websocket)
+            logger.error(f"Failed to start Gemini session", exc_info=True, extra={"session_id": session.session_id})
+            # Only try to send error if WebSocket is still open
+            try:
+                await websocket.send_json({
+                    "type": "ERROR",
+                    "payload": {"code": "GEMINI_UNAVAILABLE", "message": "AI service unavailable. Please try again."}
+                })
+            except Exception:
+                logger.warning(f"Could not send error message (WebSocket closed) [session={session.session_id}]")
+            
+            # Clean up and transition back to IDLE
+            try:
+                await NegotiationEngine.transition_state(session, NegotiationState.IDLE, websocket)
+            except Exception:
+                logger.warning(f"Could not transition to IDLE (WebSocket closed) [session={session.session_id}]")
 
     @staticmethod
     async def handle_vision_frame(session: NegotiationSession, payload: dict) -> None:
         if session.live_session:
             image_b64 = payload.get("image", "")
             if image_b64:
+                logger.debug("Received vision frame", extra={"session_id": session.session_id, "image_size": len(image_b64)})
                 await send_vision_frame(session.live_session, image_b64, session.session_id)
 
     @staticmethod
     async def handle_audio_chunk(session: NegotiationSession, raw_bytes: bytes) -> None:
         if session.live_session:
-            # Push audio to rolling buffer (for ListenerAgent)
-            if session.audio_buffer:
+            logger.debug("Received audio chunk", extra={"session_id": session.session_id, "chunk_size": len(raw_bytes)})
+            # CRITICAL: Only push audio to ListenerAgent buffer when it's NOT the AI speaking
+            # This prevents the Listener from analyzing the Live AI's own responses and
+            # creating a feedback loop where the AI processes its own output.
+            if session.audio_buffer and session.current_speaker != "ai":
                 session.audio_buffer.push(raw_bytes)
 
-            # Only send audio to the Live model if the advisor is active.
-            # Otherwise, the Live model will hear the conversation and try to respond proactively (VAD),
-            # consuming the conversational turn and breaking the flow.
-            if getattr(session, 'advisor_active', False):
-                # Acquire the send lock to prevent concurrent send_realtime_input calls
-                # (audio vs. advisor text) which cause Gemini WebSocket error 1007.
-                async with session.gemini_send_lock:
-                    await send_audio_chunk(session.live_session, raw_bytes, session.session_id)
+            # Forward audio to the Live model ONLY during the user's deliberate long-press window.
+            # This allows the Live model to transcribe the user's question via input_transcription,
+            # and to hear the user's actual voice when they press and hold.
+            # Audio is gated by user_addressing_ai so we don't stream background room audio to the
+            # Live model during normal negotiation.
+            # The 1007 codec error that occurs after the first AI audio response is handled by
+            # _reconnect_live_session, which opens a fresh session and re-primes it with context.
+            if getattr(session, 'user_addressing_ai', False):
+                await send_audio_chunk(session.live_session, raw_bytes, session.session_id)
 
     @staticmethod
     async def handle_end(session: NegotiationSession, payload: dict, websocket: WebSocket) -> None:
@@ -281,6 +369,10 @@ class NegotiationEngine:
 
     @staticmethod
     async def route_message(websocket: WebSocket, session: NegotiationSession, msg_type: str, payload: dict) -> None:
+        logger.info(
+            f"Routing message: {msg_type}",
+            extra={"message_type": msg_type, "payload": payload, "session_id": session.session_id},
+        )
         if msg_type == "PRIVACY_CONSENT_GRANTED":
             await NegotiationEngine.handle_consent(session, payload, websocket)
         elif msg_type == "START_NEGOTIATION":
@@ -301,138 +393,620 @@ class NegotiationEngine:
         elif msg_type == "SPEAKER_STOPPED":
             # VAD: User stopped speaking
             await NegotiationEngine.handle_speaker_stopped(session, websocket)
+        elif msg_type == "USER_ADDRESSING_AI":
+            # Long-press trigger: toggle audio gate to Live AI
+            await NegotiationEngine.handle_user_addressing_ai(session, payload, websocket)
+        elif msg_type == "START_COPILOT":
+            # Copilot activation: start proactive monitoring mode
+            await NegotiationEngine.handle_start_copilot(session, payload, websocket)
+        elif msg_type == "SET_RESPONSE_MODE":
+            # Set response mode (advice or command) for when user presses and holds
+            await NegotiationEngine.handle_set_response_mode(session, payload, websocket)
         else:
             logger.warning(f"Unknown message type {msg_type}")
     @staticmethod
     async def handle_speaker_stopped(session: NegotiationSession, websocket: WebSocket) -> None:
         """
-        No-op. Frontend VAD stopping chunk delivery is enough to prevent 1007 bounds crash.
-        Sending turn_complete=True here forces unwanted AI responses and burns tokens.
+        Handle SPEAKER_STOPPED message from frontend VAD.
+        
+        When user_addressing_ai is True, the user is directly speaking to the AI copilot.
+        We no longer need to manually signal turn completion here because Gemini's
+        native VAD handles natural pauses, and the long-press button release
+        (USER_ADDRESSING_AI=OFF) handles explicit turn completion.
+        
+        If we send ActivityEnd here while the user is still holding the button, 
+        it desynchronizes the turn state and causes the AI to get stuck.
         """
         pass
 
     @staticmethod
-    async def handle_ask_advice(session: NegotiationSession, payload: dict, websocket: WebSocket) -> None:
+    async def handle_user_addressing_ai(session: NegotiationSession, payload: dict, websocket: WebSocket) -> None:
         """
-        Handle ASK_ADVICE message from frontend.
-
-        Injects a text advice query into the running Gemini Live session using
-        send_client_content(), which IS supported on native audio models.
-
-        HOW IT WORKS (native audio model behaviour):
-        - Text in  → send_client_content(turn_complete=True)
-        - Audio out ← model responds with spoken advice
-        - Session continues streaming audio normally after
-
-        WHY WE SEND activity_end FIRST:
-        While audio streaming, the session has an ongoing input turn.
-        Sending send_client_content mid-stream without closing the audio turn
-        causes the two inputs to compete → model gets confused → empty response.
-        Sending activity_end first lets Gemini close the current audio turn cleanly,
-        then our text query becomes the sole pending input it needs to respond to.
+        Handles USER_ADDRESSING_AI message from frontend long-press trigger.
+        Manages the audio gate and conversation turn signals for the Live AI.
         """
-        logger.info(f"ASK_ADVICE request received [session={session.session_id}]")
+        active = bool(payload.get("active", False))
+        was_active = session.user_addressing_ai
+        session.user_addressing_ai = active
+
+        logger.info(
+            f"Audio gate to Live AI {'OPENED' if active else 'CLOSED'}. "
+            f"[session={session.session_id}]"
+        )
+
+        # When user presses button (OFF -> ON)
+        if active and not was_active and session.live_session:
+            # Clear stale transcript so we get fresh data for this activity.
+            session.last_user_transcript = ""
+            
+            try:
+                response_mode = getattr(session, 'response_mode', 'command')
+                
+                async with session.gemini_send_lock:
+                    # Inject mode instruction BEFORE audio so the AI knows how to respond
+                    # Use turn_complete=False — this is context, not a question
+                    if response_mode == 'advice':
+                        mode_instruction = "[SYSTEM: ADVICE MODE ACTIVE — provide strategic analysis, explain options, discuss pros/cons. You may ask clarifying questions.]"
+                    else:
+                        mode_instruction = "[SYSTEM: COMMAND MODE ACTIVE — give ONE direct tactical command. Start with action verb. Exact words in quotes. No questions. Max 3 sentences.]"
+                    
+                    await session.live_session.send_client_content(
+                        turns=types.Content(
+                            role="user",
+                            parts=[types.Part(text=mode_instruction)],
+                        ),
+                        turn_complete=False,
+                    )
+                    
+                    # Now open the audio gate
+                    await session.live_session.send_realtime_input(
+                        activity_start=types.ActivityStart()
+                    )
+                logger.debug(f"Mode instruction ({response_mode}) + ActivityStart sent")
+            except Exception as e:
+                logger.warning(f"ActivityStart failed (session may be reconnecting): {e}")
+
+        # When user releases button (ON -> OFF)
+        if not active and was_active and session.live_session:
+            try:
+                response_mode = getattr(session, 'response_mode', 'command')
+                
+                async with session.gemini_send_lock:
+                    # Send ActivityEnd — Gemini's native VAD handles turn completion
+                    # Do NOT follow with send_client_content(turn_complete=True) as that
+                    # breaks subsequent ActivityStart calls (second press is ignored)
+                    await session.live_session.send_realtime_input(
+                        activity_end=types.ActivityEnd()
+                    )
+                    
+                logger.debug(f"ActivityEnd sent ({response_mode} mode) — AI will respond via native VAD")
+            except Exception as e:
+                logger.warning(f"Failed to send ActivityEnd on button release: {e}")
+
+    @staticmethod
+    async def handle_start_copilot(session: NegotiationSession, payload: dict, websocket: WebSocket) -> None:
+        """
+        Handle START_COPILOT message from frontend.
+
+        Activates proactive monitoring mode on the already-open Live session.
+        The Live session was already opened at START_NEGOTIATION (D1). This handler:
+        1. Sets copilot_active flag (gates intel injections)
+        2. Sends priming injection with current negotiation context
+        3. Confirms activation to frontend
+
+        Contract C7 implementation.
+        """
+        # 1. Idempotency check — safe to press twice
+        if session.copilot_active:
+            logger.info(f"START_COPILOT ignored — already active [session={session.session_id}]")
+            return
+
+        # 2. Set the flag — gates _inject_context_to_live_ai
+        session.copilot_active = True
+        logger.info(f"Copilot activated [session={session.session_id}]")
+
+        # 3. Clear any critical events that were queued before activation.
+        #    They are not lost; they are already part of the listener's 'last_context'
+        #    and will be included in the next 'ASK_ADVICE' query.
+        if session.listener_agent and session.listener_agent._pre_activation_critical_events:
+            session.listener_agent._pre_activation_critical_events.clear()
+            logger.info(
+                f"Cleared pre-activation critical events. Context is preserved in listener state. "
+                f"[session={session.session_id}]"
+            )
         
-        # User requested advice — allow Gemini Live's audio output to reach the frontend speaker
-        session.advisor_active = True
-
-        live_session = session.live_session
-        if not live_session:
-            logger.error(f"No active Gemini session [session={session.session_id}]")
+        # 4. Verify Live session exists
+        if session.live_session is None:
+            logger.error(f"START_COPILOT failed — no Live session [session={session.session_id}]")
             await websocket.send_json({
                 "type": "ERROR",
-                "payload": {"message": "No active Gemini session"}
+                "payload": {"code": "NO_LIVE_SESSION", "message": "Live session not available"}
             })
             return
 
-        # Notify frontend immediately — user sees "AI is thinking..."
+        # 4. Empty guard — skip priming if no context accumulated yet (Risk 6)
+        last_context = {}
+        if session.listener_agent:
+            last_context = session.listener_agent.last_context or {}
+        
+        if not last_context:
+            logger.info(
+                f"Copilot activated but no context yet — skipping priming injection "
+                f"[session={session.session_id}]"
+            )
+            # Still confirm to frontend — copilot is active, just no data to prime with yet
+            await websocket.send_json({"type": "COPILOT_STARTED", "payload": {}})
+            return
+
+        # 5. Send priming injection — format current context as [LISTENER_INTEL]
+        # FIX: Use full accumulated_transcript instead of tiny transcript_snippet
+        try:
+            market_data = last_context.get("market_data")
+            market_info = ""
+            if isinstance(market_data, str):
+                market_info = f"Market Research: {market_data}"
+            elif isinstance(market_data, dict):
+                pr = market_data.get("price_range") or {}
+                market_info = f"Market Range: {pr.get('min')} – {pr.get('max')} (avg {pr.get('average')})"
+
+            # Get full accumulated transcript for complete conversation history
+            accumulated_transcript = ""
+            if session.listener_agent and session.listener_agent.accumulated_transcript:
+                accumulated_transcript = session.listener_agent.accumulated_transcript[-1500:] # Cap to last 1500 chars
+            
+            priming_text = (
+                "[LISTENER_INTEL: PRIMING]\n"
+                f"Item: {last_context.get('item') or 'unknown'}\n"
+                f"Seller Price: {last_context.get('seller_price')}\n"
+                f"Your Offer: {last_context.get('user_offer')}\n"
+                f"Your Target: {last_context.get('user_target_price')}\n"
+                f"Your Max: {last_context.get('user_max_price')}\n"
+                f"{market_info}\n"
+                f"Sentiment: {last_context.get('counterparty_sentiment', 'unknown')}\n"
+                f"Key Moments: {', '.join(last_context.get('key_moments', []))}\n"
+                f"Leverage Points: {', '.join(last_context.get('leverage_points', []))}\n"
+                f"Full Conversation Transcript: {accumulated_transcript}\n"
+                "[/LISTENER_INTEL]"
+            )
+
+            async with session.gemini_send_lock:
+                await session.live_session.send_client_content(
+                    turns=types.Content(
+                        role="system",
+                        parts=[types.Part(text=priming_text)],
+                    ),
+                    turn_complete=False,
+                )
+            
+            logger.info(
+                f"Copilot primed with current context ({len(priming_text)} chars) "
+                f"[session={session.session_id}]"
+            )
+
+        except Exception as exc:
+            logger.warning(
+                f"Copilot priming injection failed: {exc} "
+                f"[session={session.session_id}]"
+            )
+            # Don't fail activation — copilot is still active, just missed the priming
+
+        # 6. Confirm to frontend — activates "Copilot Active 🎙" indicator
+        await websocket.send_json({"type": "COPILOT_STARTED", "payload": {}})
+
+    @staticmethod
+    async def handle_set_response_mode(session: NegotiationSession, payload: dict, websocket: WebSocket) -> None:
+        """
+        Handle SET_RESPONSE_MODE message from frontend.
+        
+        Sets the response mode for when user presses and holds to talk to AI:
+        - "advice": Skip validation, return full AI response
+        - "command": Apply validation and correction if needed (default)
+        
+        This doesn't send anything to AI yet - just stores the mode.
+        When user presses and holds, the AI will respond based on this mode.
+        """
+        mode = payload.get("mode", "command")
+        
+        # Validate mode
+        if mode not in ("advice", "command"):
+            logger.warning(f"Invalid response mode: {mode}, defaulting to command")
+            mode = "command"
+        
+        session.response_mode = mode
+        logger.info(f"Response mode set to: {mode} [session={session.session_id}]")
+        
+        # Notify frontend of the mode change
+        await websocket.send_json({
+            "type": "RESPONSE_MODE_SET",
+            "payload": {"mode": mode}
+        })
+
+    @staticmethod
+    async def _inject_context_to_live_ai(
+        session: NegotiationSession,
+        context: dict,
+        critical_events: list,
+    ) -> None:
+        """
+        Silently injects a clean, simplified transcript update into the Live AI session.
+
+        This function provides the AI with conversational context without overriding its
+        core persona. It is called by the ListenerAgent periodically and for critical
+        events.
+
+        THE FIX:
+        - Sends updates with role="user" to avoid conflicting with the role="system"
+          advisor prompt.
+        - Sends a simplified [CONVERSATION UPDATE] block instead of the complex
+          [LISTENER_INTEL] block to give pure context, not instructions.
+        - Uses turn_complete=False to signal that this is background information,
+          not a direct question that requires an immediate response.
+        """
+        if not session.copilot_active or session.live_session is None:
+            return
+
+        # Queue injections if a user interaction is in flight to prevent double responses.
+        if getattr(session, 'user_addressing_ai', False) or getattr(session, 'direct_query_in_flight', False) or getattr(session, 'ai_is_speaking', False):
+            session.pending_injections.append((context, critical_events))
+            logger.info(f"Queued injection (interaction in flight).")
+            return
+
+        # Get the most recent transcript snippet for the update.
+        accumulated_transcript = ""
+        if session.listener_agent and session.listener_agent.accumulated_transcript:
+            accumulated_transcript = session.listener_agent.accumulated_transcript[-800:]
+        
+        if not accumulated_transcript.strip():
+            return # Don't send empty updates
+
+        # Build the simple, clean context block.
+        context_block = (
+            "[CONVERSATION UPDATE]\n"
+            f"{accumulated_transcript}\n"
+            "[/CONVERSATION UPDATE]"
+        )
+
+        logger.info(
+            "Injecting context update to Live AI",
+            extra={"session_id": session.session_id, "context_block": context_block},
+        )
+
+        try:
+            async with session.gemini_send_lock:
+                await session.live_session.send_client_content(
+                    turns=types.Content(
+                        role="user",  # CRITICAL FIX: Use "user" role for context.
+                        parts=[types.Part(text=context_block)],
+                    ),
+                    turn_complete=False, # This is background intel, not a question.
+                )
+            
+            logger.info("Context injection successful.")
+
+        except Exception as exc:
+            logger.warning(f"Context injection failed: {exc}")
+
+    @staticmethod
+    async def flush_pending_injections(session: NegotiationSession) -> None:
+        """
+        Flush any pending intel injections that were queued while AI was speaking.
+        
+        Called when AI completes a turn (turn_complete) to deliver all missed
+        context updates to the AI.
+        """
+        if not session.pending_injections:
+            return
+        
+        pending_count = len(session.pending_injections)
+        
+        # Take a snapshot of the pending injections and clear the queue immediately
+        # to prevent race conditions with new injections arriving during the flush.
+        injections_to_flush = list(session.pending_injections)
+        session.pending_injections.clear()
+
+        logger.info(
+            f"[CopilotEngine] DBG: Flushing {pending_count} pending injections. "
+            f"Queue is now {len(session.pending_injections)}."
+        )
+
+        all_contexts = [ctx for ctx, _ in injections_to_flush]
+        all_critical_events = [evt for _, evts in injections_to_flush for evt in evts]
+
+        # Send each context as a separate injection
+        for context in all_contexts:
+            await NegotiationEngine._inject_single_context(session, context)
+        
+        # If there were any critical events, inject them silently.
+        if all_critical_events:
+            await NegotiationEngine._inject_critical_events(session, all_critical_events, prompt_evaluation=False)
+        
+        logger.info(
+            f"[CopilotEngine] Flushed {pending_count} pending injections complete "
+            f"[session={session.session_id}]"
+        )
+
+    @staticmethod
+    async def _reconnect_live_session(session: NegotiationSession, websocket: WebSocket) -> None:
+        """
+        Auto-reconnect the Gemini Live session after a fatal 1007 codec error.
+
+        The 1007 error occurs on gemini-live-2.5-flash-native-audio because after the model
+        generates Chirp 3 audio output, the WebSocket enters a state where raw PCM audio input
+        triggers: "audio/x-raw-tokens requires ContentChunk.tokens.token_ids to be set."
+
+        Recovery strategy:
+          1. Close the broken session (it's already dead, so ignore close errors)
+          2. Open a fresh Live session — new sessions always accept raw PCM again
+          3. Re-inject the last LISTENER_INTEL context to prime the new session
+          4. Start a new receive_responses loop on the fresh session
+
+        The user experiences a ~0.5 s gap, then the copilot is fully operational again.
+        All session state (transcript, strategy_history, copilot_active, etc.) is preserved.
+        """
+        session_id = session.session_id
+        logger.info(f"[Reconnect] Starting Live session reconnect [{session_id}]")
+
+        # Brief pause so any in-flight sends can settle before we close
+        await asyncio.sleep(0.5)
+
+        # ── 1. Close the broken session ──────────────────────────────────────
+        if session.live_session_cm:
+            try:
+                await session.live_session_cm.__aexit__(None, None, None)
+            except Exception:
+                pass  # Already broken — ignore close errors
+        session.live_session = None
+
+        # ── 2. Open a fresh session ──────────────────────────────────────────
+        try:
+            api_key = getattr(session, 'api_key', None) or settings.GEMINI_API_KEY
+            new_cm = open_live_session(api_key=api_key, context=session.context)
+            session.live_session_cm = new_cm
+            session.live_session = await new_cm.__aenter__()
+
+            # Reset transient AI state — the new session starts clean
+            session.ai_is_speaking = False
+            session.direct_query_in_flight = False
+            session.pending_injections.clear()
+
+            logger.info(f"[Reconnect] New Live session opened [{session_id}]")
+
+        except Exception as e:
+            logger.error(f"[Reconnect] Failed to open new session [{session_id}]: {e}", exc_info=True)
+            try:
+                await websocket.send_json({
+                    "type": "AI_DEGRADED",
+                    "payload": {"message": "AI advisor reconnect failed. Please refresh."}
+                })
+            except Exception:
+                pass
+            return
+
+        # ── 3. Re-prime the new session with accumulated context ─────────────
+        if (session.copilot_active
+                and session.listener_agent
+                and session.listener_agent.last_context):
+            try:
+                await NegotiationEngine._inject_single_context(
+                    session, session.listener_agent.last_context
+                )
+                logger.info(f"[Reconnect] Re-primed new session with listener context [{session_id}]")
+            except Exception as e:
+                logger.warning(f"[Reconnect] Context re-prime failed (non-fatal): {e}")
+
+        # ── 4. Start a new receive loop on the fresh session ─────────────────
+        asyncio.create_task(
+            receive_responses(session.live_session, websocket, session_id, session)
+        )
+
+        logger.info(f"[Reconnect] Reconnect complete — copilot fully restored [{session_id}]")
+
+    @staticmethod
+    async def _inject_single_context(session: NegotiationSession, context: dict) -> None:
+        """Send a single context injection to the Live AI."""
+        if session.live_session is None:
+            return
+        
+        from google.genai import types
+        
+        md = context.get("market_data")
+        market_info = ""
+        if isinstance(md, str):
+            market_info = f"Market Research: {md}"
+        elif isinstance(md, dict):
+            pr = md.get("price_range") or {}
+            market_info = f"Market Range: {pr.get('min')} – {pr.get('max')} (avg {pr.get('average')})"
+        
+        accumulated_transcript = ""
+        if session.listener_agent and session.listener_agent.accumulated_transcript:
+            accumulated_transcript = session.listener_agent.accumulated_transcript[-800:]
+        
+        intel_text = (
+            "[LISTENER_INTEL]\n"
+            "ROLES: USER=BUYER (your client, wants to purchase at lowest price). "
+            "COUNTERPARTY=SELLER (asking Seller Price). Never swap these roles.\n"
+            f"Item: {context.get('item') or 'unknown'}\n"
+            f"Seller Price: {context.get('seller_price')} ← COUNTERPARTY is asking this\n"
+            f"Your Offer: {context.get('user_offer')} ← USER (buyer) offered this\n"
+            f"Your Target: {context.get('user_target_price')} ← USER wants to pay this\n"
+            f"Your Max: {context.get('user_max_price')} ← USER's absolute ceiling\n"
+            f"{market_info}\n"
+            f"Sentiment: {context.get('counterparty_sentiment', 'unknown')}\n"
+            f"Key Moments: {', '.join(context.get('key_moments', []))}\n"
+            f"Leverage Points: {', '.join(context.get('leverage_points', []))}\n"
+            f"Recent Transcript: {accumulated_transcript or context.get('transcript_snippet', '')}\n"
+            "[/LISTENER_INTEL]"
+        )
+
+        logger.info(
+            "Sending single context to Live AI",
+            extra={"session_id": session.session_id, "intel_text": intel_text},
+        )
+
+        try:
+            async with session.gemini_send_lock:
+                await session.live_session.send_client_content(
+                    turns=types.Content(
+                        role="system",
+                        parts=[types.Part(text=intel_text)],
+                    ),
+                    turn_complete=False,
+                )
+        except Exception as exc:
+            logger.warning(f"[CopilotEngine] Failed to send queued context: {exc}")
+
+    @staticmethod
+    async def _inject_critical_events(session: NegotiationSession, critical_events: list, prompt_evaluation: bool = False) -> None:
+        """Send critical events injection to the Live AI."""
+        if session.live_session is None or not critical_events:
+            return
+        
+        from google.genai import types
+        
+        # Get the most recent transcript to provide context for the event
+        accumulated_transcript = ""
+        if session.listener_agent and session.listener_agent.accumulated_transcript:
+            accumulated_transcript = session.listener_agent.accumulated_transcript[-800:]
+
+        blocks = []
+        for evt in critical_events:
+            evt_type = evt.get("event_type", "UNKNOWN")
+            detail = evt.get("detail", {})
+            blocks.append(
+                f"[LISTENER_INTEL: CRITICAL]\n"
+                f"Event: {evt_type}\n"
+                f"Detail: {detail}\n"
+                f"Recent Transcript: {accumulated_transcript}\n"
+                "[/LISTENER_INTEL]"
+            )
+        
+        logger.info(
+            "Sending critical events to Live AI",
+            extra={"session_id": session.session_id, "blocks": blocks},
+        )
+
+        try:
+            async with session.gemini_send_lock:
+                for block in blocks:
+                    await session.live_session.send_client_content(
+                        turns=types.Content(
+                            role="system",
+                            parts=[types.Part(text=block)],
+                        ),
+                        turn_complete=False,
+                    )
+                
+                if prompt_evaluation:
+                    logger.info("[CopilotEngine] Prompting AI evaluation after flushing critical events.")
+                    await session.live_session.send_client_content(
+                        turns=types.Content(
+                            role="user",
+                            parts=[types.Part(text="[Evaluate the situation and advise if needed]")],
+                        ),
+                        turn_complete=True,
+                    )
+        except Exception as exc:
+            logger.warning(f"[CopilotEngine] Failed to send critical events: {exc}")
+
+    @staticmethod
+    async def flush_pending_injections(session: NegotiationSession) -> None:
+        """
+        Flushes any pending intel injections that were queued while the AI was speaking.
+        Called from gemini_client when a turn is complete or interrupted.
+        """
+        if not hasattr(session, 'pending_injections') or not session.pending_injections:
+            return
+        
+        pending_count = len(session.pending_injections)
+        injections_to_flush = list(session.pending_injections)
+        session.pending_injections.clear()
+
+        logger.info(f"Flushing {pending_count} pending intel injections...")
+
+        for context, critical_events in injections_to_flush:
+            # Reuse the existing injector logic to send the queued data
+            await NegotiationEngine._inject_context_to_live_ai(
+                session, context, critical_events
+            )
+        
+        logger.info(f"Flush complete. [session={session.session_id}]")
+
+    @staticmethod
+    async def handle_ask_advice(session: NegotiationSession, payload: dict, websocket: WebSocket) -> None:
+        """
+        Handle ASK_ADVICE message from frontend. It gathers the latest context,
+        builds a persona-reinforcing query using build_advisor_query, and sends
+        it to the AI.
+        
+        The payload can include 'response_mode' to control validation:
+        - "advice": Skip validation, return full AI response
+        - "command": Apply validation and correction if needed (default)
+        """
+        logger.info(f"ASK_ADVICE request received [session={session.session_id}]")
+
+        live_session = session.live_session
+        if not live_session:
+            logger.error(f"No active Gemini session for ASK_ADVICE [session={session.session_id}]")
+            return
+
+        response_mode = payload.get("response_mode", "command")
+        session.response_mode = response_mode
+        logger.info(f"Response mode set to: {response_mode} [session={session.session_id}]")
+
         await websocket.send_json({"type": "AI_THINKING", "payload": {}})
 
         try:
-            # ── 1. Build the rich advisor query ──────────────────────────────
+            # Gather the latest context from the listener and the user session.
             listener_ctx = session.listener_agent.last_context if session.listener_agent else {}
             user_ctx = session.user_context or {}
 
             state_for_query = {
                 "item":         listener_ctx.get("item") or user_ctx.get("item", ""),
-                "seller_price": listener_ctx.get("seller_price") or user_ctx.get("seller_price"),
+                "seller_price": listener_ctx.get("seller_price"), # Use listener's price first
                 "target_price": user_ctx.get("target_price"),
                 "max_price":    user_ctx.get("max_price"),
+                "market_data":  listener_ctx.get("market_data"),
             }
 
-            # Extract the raw formatted transcript from the frontend ASK_ADVICE payload
-            frontend_transcript = payload.get("state", {}).get("transcript", "")
+            # Use the full accumulated transcript from the listener for the richest context
+            transcript_for_query = ""
+            if session.listener_agent and session.listener_agent.accumulated_transcript:
+                transcript_for_query = session.listener_agent.accumulated_transcript
+            
+            user_query_text = payload.get("query", "Command.")
 
+            # Build the final, persona-reinforcing query.
             from app.services.gemini_client import build_advisor_query
-            # Pass the frontend_transcript string down instead of the empty session.transcript list
-            query = build_advisor_query(state_for_query, transcript=frontend_transcript)
-
-            # Append listener intel (leverage points, sentiment, live transcript)
-            if session.listener_agent:
-                agent = session.listener_agent
-                extras = []
-                if agent.last_context.get("leverage_points"):
-                    extras.append("Leverage: " + "; ".join(agent.last_context["leverage_points"]))
-                if agent.last_context.get("sentiment"):
-                    extras.append(f"Sentiment: {agent.last_context['sentiment']}")
-                if agent.accumulated_transcript:
-                    extras.append(
-                        f'Live transcript snippet (last 400 chars):\n'
-                        f'"{agent.accumulated_transcript[-400:]}"'
-                    )
-                if extras:
-                    query += "\n\n[LISTENER INTEL]\n" + "\n".join(extras)
-
-            logger.info(
-                f"ADVISOR_QUERY ({len(query)} chars): "
-                f"{query[:150]}... [session={session.session_id}]"
+            query = build_advisor_query(
+                state=state_for_query,
+                transcript=transcript_for_query,
+                user_query=user_query_text
             )
 
-            # ── 2. Inject into Live session (hold lock so audio can't compete) ──
-            #
-            # Sequence:
-            #   a) activity_end  → tells Gemini the current audio input turn is done
-            #   b) send_client_content(turn_complete=True)  → the advice query
-            #
-            # The lock is held the entire time so no concurrent send_realtime_input
-            # (audio) calls interrupt between steps (a) and (b).
+            logger.info(
+                "Built advisor query",
+                extra={
+                    "session_id": session.session_id,
+                    "state_for_query": state_for_query,
+                    "transcript_snippet": transcript_for_query[-500:], # Log last 500 chars
+                    "user_query": user_query_text,
+                    "final_query": query,
+                },
+            )
+
+            # Set a flag to manage conversation turns.
+            session.direct_query_in_flight = True
+            
+            # Send the final query to the AI.
             async with session.gemini_send_lock:
-                # Close the ongoing audio input turn cleanly
-                await live_session.send_realtime_input(
-                    activity_end=types.ActivityEnd()
-                )
-                logger.debug(f"ActivityEnd sent [session={session.session_id}]")
-
-                # Brief yield to let the event loop process the activity_end
-                await asyncio.sleep(0.05)
-
-                # Inject text query — model responds with spoken audio advice
-                await live_session.send_client_content(
-                    turns=types.Content(
-                        role="user",
-                        parts=[types.Part(text=query)]
-                    ),
-                    turn_complete=True
-                )
-
-                # Re-open audio input so the conversation resumes after AI speaks
-                await live_session.send_realtime_input(
-                    activity_start=types.ActivityStart()
-                )
-                logger.debug(f"ActivityStart sent [session={session.session_id}]")
-
-            logger.info(
-                f"ADVISOR_QUERY injected via send_client_content "
-                f"[session={session.session_id}]"
-            )
+                await live_session.send(input=query, end_of_turn=True)
+            
+            logger.info(f"Built query sent successfully [session={session.session_id}]")
 
         except Exception as e:
-            logger.error(f"Failed to inject advice query: {e}", exc_info=True)
-            await websocket.send_json({
-                "type": "ERROR",
-                "payload": {"message": str(e)}
-            })
-            await websocket.send_json({"type": "AI_LISTENING", "payload": {}})
+            logger.error(f"Failed to send advice query: {e}", exc_info=True)
+            await websocket.send_json({"type": "ERROR", "payload": {"message": str(e)}})
+            session.direct_query_in_flight = False
 
 
 def _build_context_summary(session: NegotiationSession) -> str:

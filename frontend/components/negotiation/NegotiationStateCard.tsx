@@ -121,7 +121,27 @@ export function NegotiationStateCard({ state, isDualModelActive = false }: Negot
               <TrendingUp className="w-5 h-5 text-blue-600 mt-0.5 flex-shrink-0" />
               <div className="flex-1">
                 <div className="font-semibold text-blue-900 text-sm mb-1">Market Research</div>
-                <div className="text-sm text-blue-800 leading-relaxed">{state.market_data}</div>
+                <div className="text-sm text-blue-800 leading-relaxed">
+                  {typeof state.market_data === 'string' ? (
+                    state.market_data
+                  ) : (
+                    <div className="space-y-1">
+                      {state.market_data.price_range && (
+                        <div className="font-medium">
+                          Range: {typeof state.market_data.price_range === 'object' 
+                            ? `$${state.market_data.price_range.min} - $${state.market_data.price_range.max}` 
+                            : state.market_data.price_range}
+                        </div>
+                      )}
+                      {state.market_data.summary && (
+                        <div>{state.market_data.summary}</div>
+                      )}
+                      {!state.market_data.price_range && !state.market_data.summary && (
+                        <div>{JSON.stringify(state.market_data)}</div>
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           </div>

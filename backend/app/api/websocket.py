@@ -38,6 +38,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     break
                 
                 if "bytes" in message and message["bytes"]:
+                    logger.debug(f"🎤 Received binary audio frame: {len(message['bytes'])} bytes")
                     if not await NegotiationEngine.validate_message(websocket, session, "AUDIO_CHUNK"):
                         continue
                     await NegotiationEngine.handle_audio_chunk(session, message["bytes"])

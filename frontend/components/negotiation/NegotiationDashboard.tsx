@@ -24,10 +24,15 @@ interface NegotiationDashboardProps {
   onToggleVision: () => void;
   onStartNegotiation: () => void;
   onEndNegotiation: () => void;
-  onAskAI: () => void;
+  onStartCopilot: () => void;
+  onGetAdvice: () => void;
+  onGetCommand: () => void;
+  onUserAddressingAI: (active: boolean) => void;
   isAILoading: boolean;
   onSpeakerSelected?: (speaker: 'user' | 'counterparty') => void;
   currentSpeaker?: 'user' | 'counterparty' | null;
+  responseMode?: 'advice' | 'command' | null;
+  aiLiveTranscription?: string | null;
 }
 
 export function NegotiationDashboard({
@@ -40,17 +45,66 @@ export function NegotiationDashboard({
   onToggleVision,
   onStartNegotiation,
   onEndNegotiation,
-  onAskAI,
+  onStartCopilot,
+  onGetAdvice,
+  onGetCommand,
+  onUserAddressingAI,
   isAILoading,
   onSpeakerSelected,
-  currentSpeaker
+  currentSpeaker,
+  responseMode,
+  aiLiveTranscription
 }: NegotiationDashboardProps) {
+  const [isAddressingAI, setIsAddressingAI] = React.useState(false);
+  const longPressTimerRef = React.useRef<NodeJS.Timeout | null>(null);
+
+  const handlePointerDown = React.useCallback(() => {
+    console.log('[DEBUG] handlePointerDown called, copilotActive:', state.copilotActive);
+    
+    if (!state.copilotActive) {
+      console.log('[DEBUG] Copilot not active, ignoring press');
+      return;
+    }
+    
+    console.log('[DEBUG] Starting 600ms timer for hold detection');
+    longPressTimerRef.current = setTimeout(() => {
+      console.log('[DEBUG] Hold threshold reached, activating AI');
+      // Haptic feedback
+      if (navigator.vibrate) {
+        navigator.vibrate(30);
+      }
+      setIsAddressingAI(true);
+      onUserAddressingAI(true);
+    }, 600);
+  }, [state.copilotActive, onUserAddressingAI]);
+
+  const handlePointerEnd = React.useCallback(() => {
+    console.log('[DEBUG] handlePointerEnd called, isAddressingAI:', isAddressingAI);
+    
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+    
+    if (isAddressingAI) {
+      console.log('[DEBUG] Deactivating AI');
+      setIsAddressingAI(false);
+      onUserAddressingAI(false);
+    }
+  }, [isAddressingAI, onUserAddressingAI]);
+
   if (!state.consentGiven) {
     return <PrivacyConsent onAccept={onConsent} />;
   }
 
   return (
-    <div className="flex flex-col h-screen w-full bg-neutral-100 overflow-hidden">
+    <div 
+      className="flex flex-col h-screen w-full bg-neutral-100 overflow-hidden"
+      onPointerDown={handlePointerDown}
+      onPointerUp={handlePointerEnd}
+      onPointerCancel={handlePointerEnd}
+      onMouseLeave={handlePointerEnd}
+    >
       {/* AI State Indicator - shows listening/thinking/speaking */}
       <AIStateIndicator state={state.aiState} />
 
@@ -136,14 +190,38 @@ export function NegotiationDashboard({
         />
       </div>
 
-      {/* Ask AI Button - Floating button for advice */}
+      {/* Ask AI Buttons - Advice and Command options */}
       {state.isNegotiating && (
         <div className="fixed bottom-24 right-8 z-50">
           <AskAIButton
-            onAskAI={onAskAI}
+            onStartCopilot={onStartCopilot}
+            onGetAdvice={onGetAdvice}
+            onGetCommand={onGetCommand}
             isLoading={isAILoading}
             isDisabled={!state.isNegotiating}
+            copilotActive={state.copilotActive}
+            responseMode={responseMode}
           />
+        </div>
+      )}
+
+      {/* AI Live Transcription - isolated display, not part of transcript */}
+      {aiLiveTranscription && state.aiState === 'speaking' && (
+        <div className="fixed bottom-36 left-1/2 transform -translate-x-1/2 z-40 max-w-lg w-full px-4 pointer-events-none">
+          <div className="bg-neutral-900/85 text-white px-5 py-3 rounded-xl shadow-xl text-sm leading-relaxed">
+            <span className="text-blue-400 font-medium text-xs uppercase tracking-wide block mb-1">AI</span>
+            {aiLiveTranscription}
+          </div>
+        </div>
+      )}
+
+      {/* Addressing AI Indicator - shows when user is holding to speak to AI */}
+      {isAddressingAI && (
+        <div className="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-50 pointer-events-none">
+          <div className="bg-blue-600/90 text-white px-8 py-4 rounded-2xl shadow-2xl flex items-center gap-3 animate-pulse">
+            <div className="w-3 h-3 bg-white rounded-full animate-ping"></div>
+            <span className="font-semibold text-lg">Listening to you...</span>
+          </div>
         </div>
       )}
 
