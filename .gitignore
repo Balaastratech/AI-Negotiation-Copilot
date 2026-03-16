@@ -80,6 +80,9 @@ localhost-*.log
 # Planning / internal docs
 .planning/
 .claude/
+.kiro/
+.hypothesis/
+
 log_back.md
 promp.md
 
@@ -90,3 +93,6 @@ FEEDBACK_LOOP_FIX.md
 GEMINI_FIX_IMPLEMENTATION.md
 backend/pyrightconfig.json
 backend/test_validator.py
+hackathon.md
+VIDEO_INTELLIGENCE_INTEGRATION_PLAN.md
+WHAT_WE_ARE_BUILDING.md

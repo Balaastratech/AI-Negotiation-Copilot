@@ -4,7 +4,7 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.services.connection_manager import connection_manager
-from app.models.negotiation import NegotiationSession
+from app.models.negotiation import NegotiationSession, NegotiationState
 from app.services.negotiation_engine import NegotiationEngine
 
 router = APIRouter()
@@ -39,9 +39,13 @@ async def websocket_endpoint(websocket: WebSocket):
                 
                 if "bytes" in message and message["bytes"]:
                     logger.debug(f"🎤 Received binary audio frame: {len(message['bytes'])} bytes")
-                    if not await NegotiationEngine.validate_message(websocket, session, "AUDIO_CHUNK"):
-                        continue
-                    await NegotiationEngine.handle_audio_chunk(session, message["bytes"])
+                    
+                    if session.state == NegotiationState.ACTIVE:
+                        if not await NegotiationEngine.validate_message(websocket, session, "AUDIO_CHUNK"):
+                            continue
+                        await NegotiationEngine.handle_audio_chunk(session, message["bytes"])
+                    else:
+                        logger.warning(f"Discarding audio chunk in state: {session.state}")
                     
                 elif "text" in message and message["text"]:
                     data = json.loads(message["text"])

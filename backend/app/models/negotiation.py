@@ -69,13 +69,33 @@ class NegotiationSession(BaseModel):
     # The Gemini Live SDK raises errors if audio and text are sent concurrently.
     gemini_send_lock: Any = Field(default_factory=asyncio.Lock)
 
-    # Speaker identification (from voice fingerprinting)
-    current_speaker: str = "user"  # "user" or "counterparty"
+    # Speaker identification (manual selection only)
+    current_speaker: str = "unknown"  # "user", "counterparty", or "unknown"
+    manual_override_until: Optional[float] = None # Timestamp until which auto-recognition is paused
     speaker_last_updated: float = 0.0  # timestamp of last speaker update
+    # Timeline of speaker changes: [{speaker, timestamp}] — used by ListenerAgent for per-window attribution
+    speaker_timeline: list = Field(default_factory=list)
+    # Speaker mapping for Gemini diarization: {"Speaker 1": "user", "Speaker 2": "counterparty"}
+    speaker_mapping: dict = Field(default_factory=dict)
     
     # Transcript buffering (for accurate speaker labeling)
     pending_transcripts: list[dict] = []  # Transcripts waiting for speaker confirmation
-    
+
+    # Speaker segment tracking — who is speaking NOW (set on button click)
+    speaker_segment_start: float = 0.0      # kept for manual_mode guard only
+    speaker_segment_speaker: str = "unknown"
+
+    # Direct audio accumulation for the current speaker turn.
+    # Audio is appended here on every AUDIO_CHUNK while this speaker is active.
+    # On the NEXT button click the buffer is extracted and transcribed with the
+    # PREVIOUS speaker label — no timestamp arithmetic, no clock-drift issues.
+    current_segment_audio: bytes = b""
+
+    # Captures raw PCM audio while user holds the "Ask AI" button.
+    # Transcribed to text on button release for reliable Live AI question answering.
+    # Audio is NOT pushed to the listener buffer during this window.
+    question_capture_bytes: bytes = b""
+
     # Outcome tracking
     initial_price: Optional[float] = None
     final_price: Optional[float] = None

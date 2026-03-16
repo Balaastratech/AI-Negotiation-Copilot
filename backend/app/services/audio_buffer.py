@@ -75,6 +75,35 @@ class AudioBuffer:
             all_data = b"".join(self._buf)
             return all_data[-wanted:] if len(all_data) >= wanted else all_data
 
+    def get_segment(self, start_seconds_ago: float, end_seconds_ago: float) -> bytes:
+        """
+        Return a slice of audio between two points relative to NOW (in seconds ago).
+
+        Example: get_segment(10, 5) returns audio from 10s ago to 5s ago.
+        start_seconds_ago must be >= end_seconds_ago.
+
+        Returns empty bytes if the range is invalid or no audio available.
+        """
+        if start_seconds_ago <= end_seconds_ago:
+            return b""
+        with self._lock:
+            if self._total_bytes == 0:
+                return b""
+            all_data = b"".join(self._buf)
+            total_len = len(all_data)
+            # Convert seconds-ago to byte offsets from the END of the buffer
+            end_offset = int(end_seconds_ago * BYTES_PER_SECOND)
+            start_offset = int(start_seconds_ago * BYTES_PER_SECOND)
+            # Clamp to available data
+            start_offset = min(start_offset, total_len)
+            end_offset = max(end_offset, 0)
+            # Slice: from (total_len - start_offset) to (total_len - end_offset)
+            slice_start = total_len - start_offset
+            slice_end = total_len - end_offset
+            if slice_start >= slice_end:
+                return b""
+            return all_data[slice_start:slice_end]
+
     @property
     def duration_seconds(self) -> float:
         """How many seconds of audio are currently stored."""

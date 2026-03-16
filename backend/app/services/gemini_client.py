@@ -54,31 +54,89 @@ def _build_context_summary(session: NegotiationSession) -> str:
 
 def build_advisor_query(state: dict, transcript: list = None, user_query: str = "Command.") -> str:
     """
-    Builds a persona-reinforcing query for the COMMAND CENTER AI.
+    Builds a context-rich query for the Live AI.
 
-    This function frames the user's request as a tactical command, explicitly
-    reminding the AI of its core persona and instructions from the
-    ADVISOR_SYSTEM_PROMPT to prevent persona-breaking conversational drift.
-    
+    Embeds the full negotiation snapshot (prices, market research, leverage,
+    sentiment) plus the labeled conversation transcript so the AI has everything
+    it needs to answer the user's specific request accurately.
+
     Args:
-        state: The current negotiation state (included for compatibility).
-        transcript: A recent transcript snippet (included for compatibility).
-        user_query: The live query from the user.
+        state: Extracted context dict from the ListenerAgent.
+        transcript: Full accumulated transcript string (or list of turn dicts).
+        user_query: The user's explicit request / question.
 
     Returns:
-        A formatted string to be sent to the Gemini Live API.
+        A formatted string sent to the Gemini Live API via send().
     """
-    reminder = "You are a ruthless tactical commander. Adhere strictly to the persona and instructions defined in your ADVISOR_SYSTEM_PROMPT."
+    # ── Pull all fields from state ────────────────────────────────────────────
+    item              = state.get("item") or "unknown"
+    neg_type          = state.get("negotiation_type") or "unknown"
+    seller_price      = (state.get("seller_price")
+                         or state.get("seller_asking_price")
+                         or state.get("counterparty_price"))
+    buyer_offer       = state.get("buyer_offer") or state.get("user_price")
+    target_price      = state.get("target_price") or state.get("user_target_price")
+    walk_away         = state.get("max_price") or state.get("user_walk_away_price")
+    sentiment         = state.get("counterparty_sentiment") or "unknown"
+    cp_goal           = state.get("counterparty_goal") or "unknown"
+    key_moments       = state.get("key_moments", [])
+    leverage_points   = state.get("leverage_points", [])
+    market_data       = state.get("market_data")
 
-    # Frame the query as a direct order for tactical advice.
-    query_block = (
-        "[TACTICAL REQUEST]\n"
-        f"INSTRUCTION: {reminder}\n"
-        "Analyze all available context from the ongoing conversation and give me a direct, decisive command. Do not ask questions or offer options.\n"
-        f"My explicit query is: \"{user_query}\"\n"
-        "[/TACTICAL REQUEST]"
+    # ── Format market research ────────────────────────────────────────────────
+    market_info = "Not yet researched"
+    if market_data:
+        if isinstance(market_data, str):
+            market_info = market_data
+        elif isinstance(market_data, dict):
+            pr       = market_data.get("price_range") or {}
+            facts    = market_data.get("key_facts", "")
+            leverage = market_data.get("leverage", "")
+            tactics  = market_data.get("tactics", "")
+            market_info = f"Fair price range: {pr.get('min')} – {pr.get('max')} (avg {pr.get('average')})"
+            if facts:    market_info += f"\nKey facts: {facts}"
+            if leverage: market_info += f"\nLeverage: {leverage}"
+            if tactics:  market_info += f"\nTactics: {tactics}"
+
+    # ── Format transcript ─────────────────────────────────────────────────────
+    transcript_text = ""
+    if isinstance(transcript, str) and transcript.strip():
+        transcript_text = transcript[-2000:]
+    elif isinstance(transcript, list) and transcript:
+        lines = [
+            f"{e.get('speaker', 'unknown').upper()}: {e.get('text', '')}"
+            for e in transcript[-20:]
+        ]
+        transcript_text = "\n".join(lines)
+
+    # ── Assemble the query ────────────────────────────────────────────────────
+    snapshot = (
+        f"NEGOTIATION SNAPSHOT:\n"
+        f"  Item: {item}\n"
+        f"  Type: {neg_type}\n"
+        f"  Their asking price: {seller_price}\n"
+        f"  My current offer: {buyer_offer}\n"
+        f"  My target price: {target_price}\n"
+        f"  My walk-away limit: {walk_away}\n"
+        f"  Their sentiment: {sentiment}\n"
+        f"  Their goal: {cp_goal}\n"
+        f"  Key moments: {'; '.join(key_moments) if key_moments else 'none'}\n"
+        f"  Leverage points: {'; '.join(leverage_points) if leverage_points else 'none'}\n"
+        f"  Market research: {market_info}"
     )
-    return query_block
+
+    convo = (
+        f"\nRECENT CONVERSATION (labeled by speaker):\n{transcript_text}"
+        if transcript_text else ""
+    )
+
+    return (
+        f"[TACTICAL REQUEST]\n"
+        f"{snapshot}"
+        f"{convo}\n\n"
+        f"MY REQUEST: {user_query}\n"
+        f"[/TACTICAL REQUEST]"
+    )
 
 
 async def trigger_advice_response(live_session, state: dict, transcript: list = None) -> None:
@@ -619,14 +677,28 @@ class GeminiClient:
                             "timestamp": int(time.time() * 1000)
                         }
                         
-                        logger.info(f"📝 Transcript received: '{sc.input_transcription.text}' (current_speaker={speaker}) [{session_id}]")
+                        # Enhanced logging for speaker labeling verification
+                        logger.info("=" * 70)
+                        logger.info("📝 TRANSCRIPT RECEIVED FROM GEMINI")
+                        logger.info("=" * 70)
+                        logger.info(f"Text: '{sc.input_transcription.text}'")
+                        logger.info(f"Speaker Label: {speaker.upper()}")
+                        logger.info(f"Timestamp: {transcript_payload['timestamp']}")
+                        logger.info(f"Session: {session_id}")
+                        
+                        # Check speaker timeline for verification
+                        if session and hasattr(session, 'speaker_timeline'):
+                            recent_speakers = session.speaker_timeline[-3:] if session.speaker_timeline else []
+                            logger.info(f"Recent speaker timeline: {recent_speakers}")
+                        
+                        logger.info("=" * 70)
                         
                         if session:
                             session.last_user_transcript = sc.input_transcription.text
 
                         # Send user transcripts immediately for separate display
                         # This ensures each question appears separately in the UI
-                        logger.info(f"✅ Sending transcript immediately (speaker={speaker.upper()}) [{session_id}]")
+                        logger.info(f"✅ Sending transcript to FRONTEND (speaker={speaker.upper()}) [{session_id}]")
                         await websocket.send_json({
                             "type": "TRANSCRIPT_UPDATE",
                             "payload": transcript_payload
@@ -755,17 +827,24 @@ class GeminiClient:
                         # will immediately call receive() again for the next turn.
                         break
 
-                # If we exited the loop without turn_complete, something went wrong
+                # If we exited the loop without turn_complete, the Gemini session dropped mid-turn.
+                # This is the same class of recoverable error as 1006/1011 — trigger reconnect.
                 if not turn_complete_received:
                     logger.error(f"⚠ receive() ended without turn_complete after {turn_response_count} responses [{session_id}]")
-                    logger.error(f"  This may indicate a connection issue or session closure")
-                    try:
-                        await websocket.send_json({
-                            "type": "AI_DEGRADED",
-                            "payload": {"message": "AI connection ended unexpectedly. Please refresh to reconnect."}
-                        })
-                    except Exception:
-                        pass
+                    logger.error(f"  Session likely dropped — triggering auto-reconnect")
+                    if session:
+                        from app.services.negotiation_engine import NegotiationEngine
+                        asyncio.create_task(
+                            NegotiationEngine._reconnect_live_session(session, websocket)
+                        )
+                    else:
+                        try:
+                            await websocket.send_json({
+                                "type": "AI_DEGRADED",
+                                "payload": {"message": "AI connection ended unexpectedly. Please refresh to reconnect."}
+                            })
+                        except Exception:
+                            pass
                     break
 
                 # Turn completed successfully, increment counter and loop will call receive() again for next turn
@@ -780,13 +859,25 @@ class GeminiClient:
                 error_type = type(e).__name__
                 error_msg = str(e)
 
-                # Check if this is the 1007 Chirp 3 codec error (native audio model state mismatch).
-                # After the model generates audio output, subsequent raw PCM input causes:
-                #   "audio/x-raw-tokens requires ContentChunk.tokens.token_ids to be set"
-                # Recovery: auto-reconnect opens a fresh session that accepts PCM again.
-                if "1007" in error_msg or "invalid frame payload data" in error_msg or "inputaudio" in error_msg:
+                # Determine if this is a recoverable connection drop that warrants auto-reconnect.
+                # 1007 — Chirp 3 codec error (PCM input after audio output)
+                # 1006 — Abnormal closure (google.genai.errors.APIError: 1006 None)
+                # 1011 — Keepalive ping timeout (ConnectionClosedError: sent 1011)
+                is_reconnectable = (
+                    "1007" in error_msg
+                    or "invalid frame payload data" in error_msg
+                    or "inputaudio" in error_msg
+                    or "1006" in error_msg
+                    or "1011" in error_msg
+                    or "abnormal closure" in error_msg.lower()
+                    or "keepalive ping timeout" in error_msg.lower()
+                    or "ConnectionClosedError" in error_type
+                )
+
+                if is_reconnectable:
                     logger.warning(
-                        f"1007 codec error [{session_id}] — triggering auto-reconnect: {error_msg}"
+                        f"Recoverable connection drop [{session_id}] — triggering auto-reconnect: "
+                        f"{error_type}: {error_msg}"
                     )
                     if session:
                         from app.services.negotiation_engine import NegotiationEngine
@@ -797,7 +888,7 @@ class GeminiClient:
                         try:
                             await websocket.send_json({
                                 "type": "AI_DEGRADED",
-                                "payload": {"message": "AI connection error (1007). Please refresh."}
+                                "payload": {"message": "AI connection dropped. Please refresh."}
                             })
                         except Exception:
                             pass

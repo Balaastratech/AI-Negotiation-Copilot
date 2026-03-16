@@ -98,7 +98,7 @@ class NegotiationEngine:
                 "recording_active": True
             }
         })
-
+        
     @staticmethod
     async def handle_start(session: NegotiationSession, payload: dict, websocket: WebSocket, api_key: str) -> None:
         context = payload.get("context", "")
@@ -240,22 +240,24 @@ class NegotiationEngine:
     @staticmethod
     async def handle_audio_chunk(session: NegotiationSession, raw_bytes: bytes) -> None:
         if session.live_session:
-            logger.debug("Received audio chunk", extra={"session_id": session.session_id, "chunk_size": len(raw_bytes)})
-            # CRITICAL: Only push audio to ListenerAgent buffer when it's NOT the AI speaking
-            # This prevents the Listener from analyzing the Live AI's own responses and
-            # creating a feedback loop where the AI processes its own output.
-            if session.audio_buffer and session.current_speaker != "ai":
+            if getattr(session, "user_addressing_ai", False):
+                # ── Ask AI mode ──────────────────────────────────────────────
+                # Capture audio locally for question transcription.
+                # Do NOT push to listener buffer (prevents question from
+                # polluting negotiation context extraction).
+                # Do NOT stream to Live AI (we'll send as text after transcription).
+                session.question_capture_bytes += raw_bytes
+            elif session.audio_buffer and session.current_speaker != "ai":
+                # ── Normal negotiation mode ──────────────────────────────────
+                # Push to listener buffer for context extraction.
                 session.audio_buffer.push(raw_bytes)
-
-            # Forward audio to the Live model ONLY during the user's deliberate long-press window.
-            # This allows the Live model to transcribe the user's question via input_transcription,
-            # and to hear the user's actual voice when they press and hold.
-            # Audio is gated by user_addressing_ai so we don't stream background room audio to the
-            # Live model during normal negotiation.
-            # The 1007 codec error that occurs after the first AI audio response is handled by
-            # _reconnect_live_session, which opens a fresh session and re-primes it with context.
-            if getattr(session, 'user_addressing_ai', False):
-                await send_audio_chunk(session.live_session, raw_bytes, session.session_id)
+                # Accumulate into the per-segment buffer so that on the next speaker
+                # button click we transcribe EXACTLY the audio captured during this
+                # speaker's turn — no timestamp arithmetic, no clock-drift issues.
+                session.current_segment_audio += raw_bytes
+                # Cap at 120s to avoid unbounded memory growth
+                if len(session.current_segment_audio) > 120 * 32000:
+                    session.current_segment_audio = session.current_segment_audio[-90 * 32000:]
 
     @staticmethod
     async def handle_end(session: NegotiationSession, payload: dict, websocket: WebSocket) -> None:
@@ -304,8 +306,8 @@ class NegotiationEngine:
             payload: State updates from AI (item, prices, etc.)
             websocket: WebSocket connection to forward to frontend
         """
-        logger.info(f"AI state update received [session={session.session_id}]: {payload}")
-
+        logger.info(f"AI state update received [session={session.session_id}]: {payload}")       
+        
         # Forward state update to frontend
         await websocket.send_json({
             "type": "STATE_UPDATE",
@@ -320,7 +322,7 @@ class NegotiationEngine:
         
         Updates the current speaker label and flushes any buffered transcripts
         with the correct speaker label.
-        
+
         Args:
             session: Current negotiation session
             payload: Contains speaker label ('user' or 'counterparty') and timestamp (in milliseconds)
@@ -336,9 +338,34 @@ class NegotiationEngine:
         speaker_changed = session.current_speaker != speaker
         is_first_identification = session.speaker_last_updated == 0
         
+        # Once a speaker button is clicked, disable automatic recognition permanently
+        # (for the lifetime of this session). Only manual button clicks determine who spoke.
+        session.manual_override_until = float('inf')
+        
         # Store current speaker in session
         session.current_speaker = speaker
         session.speaker_last_updated = timestamp
+
+        # Append to speaker timeline for ListenerAgent window attribution
+        session.speaker_timeline.append({
+            "speaker": speaker,
+            "timestamp": timestamp,
+        })
+        # Keep only the last 5 minutes of timeline entries (cap at 300 entries at ~1/s)
+        if len(session.speaker_timeline) > 300:
+            session.speaker_timeline = session.speaker_timeline[-300:]
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # 🎯 BACKEND SPEAKER IDENTIFICATION LOG
+        # ═══════════════════════════════════════════════════════════════════
+        logger.info("=" * 70)
+        logger.info("🎯 SPEAKER IDENTIFICATION RECEIVED FROM FRONTEND")
+        logger.info("=" * 70)
+        logger.info(f"📊 Speaker: {speaker.upper()}")
+        logger.info(f"⏰ Timestamp: {timestamp}")
+        logger.info(f"🔄 Speaker Changed: {speaker_changed}")
+        logger.info(f"🆕 First Identification: {is_first_identification}")
+        logger.info(f"📝 Session ID: {session.session_id}")
         
         if is_first_identification:
             logger.info(f"✓ First speaker identified: {speaker.upper()} [session={session.session_id}]")
@@ -347,25 +374,59 @@ class NegotiationEngine:
         else:
             logger.info(f"✓ Speaker confirmed: {speaker.upper()} [session={session.session_id}]")
         
-        # Flush any buffered transcripts with the correct speaker label
+        # ── Event-driven segment transcription ──────────────────────────────
+        # Button switch = previous speaker's turn is now complete.
+        # Take the audio accumulated in current_segment_audio (filled by handle_audio_chunk)
+        # — this is EXACTLY the audio from the last button click to now, no timestamp
+        # arithmetic or clock-drift involved.
+        prev_speaker = session.speaker_segment_speaker
+        if speaker_changed and session.listener_agent:
+            segment_audio = session.current_segment_audio
+            seg_start_ts = session.speaker_segment_start  # for timestamp display only
+            seg_end_ts = timestamp
+            if len(segment_audio) >= 3200:  # at least 0.1s
+                duration_s = len(segment_audio) / 32000
+                logger.info(
+                    f"[Engine] Transcribing {prev_speaker} segment: "
+                    f"{duration_s:.1f}s ({len(segment_audio)} bytes)"
+                )
+                asyncio.create_task(
+                    session.listener_agent.transcribe_segment(
+                        speaker=prev_speaker,
+                        audio=segment_audio,
+                        start_time=seg_start_ts,
+                        end_time=seg_end_ts,
+                    )
+                )
+            else:
+                logger.debug(f"[Engine] Segment too short ({len(segment_audio)} bytes), skipping")
+
+        # Reset segment buffer and update speaker tracking for the new turn
+        session.current_segment_audio = b""
+        session.speaker_segment_start = timestamp
+        session.speaker_segment_speaker = speaker
+
+        # Flush any buffered transcripts — keep each transcript's ORIGINAL speaker label.
+        # The label is frozen at capture time, never overwritten by a later button click.
         if session.pending_transcripts:
-            logger.info(f"🔓 Flushing {len(session.pending_transcripts)} buffered transcripts with speaker={speaker.upper()} [session={session.session_id}]")
-            
-            for idx, buffered_transcript in enumerate(session.pending_transcripts, 1):
-                # Update speaker label
-                buffered_transcript["speaker"] = speaker
-                
-                logger.info(f"   Flushing transcript {idx}/{len(session.pending_transcripts)}: '{buffered_transcript['text'][:50]}...' as {speaker.upper()} [session={session.session_id}]")
-                
-                # Send to frontend
+            logger.info(f"🔓 FLUSHING {len(session.pending_transcripts)} buffered transcripts (labels preserved)")
+            for buffered_transcript in session.pending_transcripts:
+                # Only fill in "unknown" labels with the PREVIOUS speaker (not the new one)
+                if buffered_transcript.get("speaker") == "unknown":
+                    buffered_transcript["speaker"] = prev_speaker if prev_speaker != "unknown" else speaker
                 await websocket.send_json({
                     "type": "TRANSCRIPT_UPDATE",
                     "payload": buffered_transcript
                 })
-            
-            # Clear buffer
             session.pending_transcripts = []
-            logger.info(f"✅ Buffer cleared [session={session.session_id}]")
+        else:
+            logger.info("📭 No buffered transcripts to flush")
+        
+        logger.info("=" * 70)
+        logger.info(f"✅ SPEAKER IDENTIFICATION COMPLETE: {speaker.upper()}")
+        logger.info(f"   Future transcripts will be labeled as: {speaker.upper()}")
+        logger.info("=" * 70)
+        logger.info("")
 
     @staticmethod
     async def route_message(websocket: WebSocket, session: NegotiationSession, msg_type: str, payload: dict) -> None:
@@ -413,7 +474,7 @@ class NegotiationEngine:
         We no longer need to manually signal turn completion here because Gemini's
         native VAD handles natural pauses, and the long-press button release
         (USER_ADDRESSING_AI=OFF) handles explicit turn completion.
-        
+      
         If we send ActivityEnd here while the user is still holding the button, 
         it desynchronizes the turn state and causes the AI to get stuck.
         """
@@ -436,20 +497,84 @@ class NegotiationEngine:
 
         # When user presses button (OFF -> ON)
         if active and not was_active and session.live_session:
-            # Clear stale transcript so we get fresh data for this activity.
+            # Clear any leftover audio from a previous question
+            session.question_capture_bytes = b""
             session.last_user_transcript = ""
-            
+            # Also reset the negotiation segment buffer so the Ask AI audio
+            # doesn't get included in the next speaker's transcript segment.
+            session.current_segment_audio = b""
+
             try:
                 response_mode = getattr(session, 'response_mode', 'command')
-                
+
+                # Inject the latest full intel snapshot so the AI is briefed
+                # on current context before it receives the question.
+                if session.listener_agent and session.listener_agent.last_context:
+                    ctx = session.listener_agent.last_context
+                    market_data = ctx.get("market_data")
+                    market_info = "Not yet researched"
+                    if isinstance(market_data, str):
+                        market_info = market_data
+                    elif isinstance(market_data, dict):
+                        pr = market_data.get("price_range") or {}
+                        facts = market_data.get("key_facts", "")
+                        leverage = market_data.get("leverage", "")
+                        market_info = f"Fair range: {pr.get('min')} – {pr.get('max')} (avg {pr.get('average')})"
+                        if facts:    market_info += f" | Facts: {facts}"
+                        if leverage: market_info += f" | Leverage: {leverage}"
+
+                    transcript_text = ""
+                    if session.listener_agent.accumulated_transcript:
+                        transcript_text = session.listener_agent.accumulated_transcript[-1500:]
+
+                    pre_brief = (
+                        "[LISTENER_INTEL: PRE-QUERY BRIEF]\n"
+                        f"Item: {ctx.get('item') or 'unknown'}\n"
+                        f"Type: {ctx.get('negotiation_type') or 'unknown'}\n"
+                        f"Their asking price: {ctx.get('seller_asking_price') or ctx.get('counterparty_price')}\n"
+                        f"My offer: {ctx.get('buyer_offer') or ctx.get('user_price')}\n"
+                        f"My target: {ctx.get('user_target_price')}\n"
+                        f"My walk-away: {ctx.get('user_walk_away_price')}\n"
+                        f"Their sentiment: {ctx.get('counterparty_sentiment', 'unknown')}\n"
+                        f"Their goal: {ctx.get('counterparty_goal', 'unknown')}\n"
+                        f"Key moments: {'; '.join(ctx.get('key_moments', [])) or 'none'}\n"
+                        f"Leverage: {'; '.join(ctx.get('leverage_points', [])) or 'none'}\n"
+                        f"Market research: {market_info}\n"
+                        f"\nCONVERSATION SO FAR:\n{transcript_text}\n"
+                        "[/LISTENER_INTEL]\n"
+                        "INSTRUCTION: Stay silent. Do not respond yet. Wait for the user to speak."
+                    )
+
+                    async with session.gemini_send_lock:
+                        await session.live_session.send_client_content(
+                            turns=types.Content(
+                                role="user",
+                                parts=[types.Part(text=pre_brief)],
+                            ),
+                            turn_complete=False,
+                        )
+                    logger.info(f"Pre-query intel brief sent ({len(pre_brief)} chars)")
+
                 async with session.gemini_send_lock:
-                    # Inject mode instruction BEFORE audio so the AI knows how to respond
-                    # Use turn_complete=False — this is context, not a question
                     if response_mode == 'advice':
-                        mode_instruction = "[SYSTEM: ADVICE MODE ACTIVE — provide strategic analysis, explain options, discuss pros/cons. You may ask clarifying questions.]"
+                        mode_instruction = (
+                            "[SYSTEM: ADVICE MODE ACTIVE]\n"
+                            "The user is about to ask you a specific question. "
+                            "Your response MUST directly answer their exact question. "
+                            "Use the intel above as background context only. "
+                            "Do not ignore their question or give a generic strategy overview. "
+                            "Their question is coming now — wait for it."
+                        )
                     else:
-                        mode_instruction = "[SYSTEM: COMMAND MODE ACTIVE — give ONE direct tactical command. Start with action verb. Exact words in quotes. No questions. Max 3 sentences.]"
-                    
+                        mode_instruction = (
+                            "[SYSTEM: COMMAND MODE ACTIVE]\n"
+                            "The user is about to ask you a specific question. "
+                            "Give ONE direct tactical command that answers their exact question. "
+                            "Use the intel above as context only — do not recite it. "
+                            "Start with: Ask / Say / Counter / Tell / Push / Walk / Stay / Offer. "
+                            "Their question is coming now — wait for it."
+                        )
+
                     await session.live_session.send_client_content(
                         turns=types.Content(
                             role="user",
@@ -457,44 +582,85 @@ class NegotiationEngine:
                         ),
                         turn_complete=False,
                     )
-                    
-                    # Now open the audio gate
-                    await session.live_session.send_realtime_input(
-                        activity_start=types.ActivityStart()
-                    )
-                logger.debug(f"Mode instruction ({response_mode}) + ActivityStart sent")
+                logger.debug(f"Pre-brief + mode instruction sent ({response_mode}). Capturing question audio.")
             except Exception as e:
-                logger.warning(f"ActivityStart failed (session may be reconnecting): {e}")
+                logger.warning(f"Pre-brief send failed (session may be reconnecting): {e}")
 
         # When user releases button (ON -> OFF)
         if not active and was_active and session.live_session:
-            try:
-                response_mode = getattr(session, 'response_mode', 'command')
-                
-                async with session.gemini_send_lock:
-                    # Send ActivityEnd — Gemini's native VAD handles turn completion
-                    # Do NOT follow with send_client_content(turn_complete=True) as that
-                    # breaks subsequent ActivityStart calls (second press is ignored)
-                    await session.live_session.send_realtime_input(
-                        activity_end=types.ActivityEnd()
-                    )
-                    
-                logger.debug(f"ActivityEnd sent ({response_mode} mode) — AI will respond via native VAD")
-            except Exception as e:
-                logger.warning(f"Failed to send ActivityEnd on button release: {e}")
+            # Take captured audio and send the question as text to Live AI.
+            # Text-based questions ensure the AI answers what was actually asked,
+            # not just the general context.
+            question_audio = session.question_capture_bytes
+            session.question_capture_bytes = b""
+
+            async def _handle_question(
+                q_audio: bytes,
+                live_session=session.live_session,
+                listener=session.listener_agent,
+                lock=session.gemini_send_lock,
+                ws=websocket,
+                sess=session,
+            ):
+                try:
+                    q_text = ""
+                    if q_audio and len(q_audio) >= 3200 and listener:
+                        q_text = await asyncio.get_event_loop().run_in_executor(
+                            None, lambda: listener._fast_transcribe(q_audio)
+                        )
+                        q_text = (q_text or "").strip()
+
+                    # Show what the user asked in the sidebar transcript
+                    if q_text:
+                        try:
+                            await ws.send_json({
+                                "type": "TRANSCRIPT_UPDATE",
+                                "payload": {
+                                    "id": f"q_{int(time.time() * 1000)}",
+                                    "speaker": "user",
+                                    "text": q_text,
+                                    "timestamp": int(time.time() * 1000),
+                                    "context": "ask_ai",  # routes to AI Advisor panel, not Conversation panel
+                                },
+                            })
+                        except Exception:
+                            pass
+
+                    # Build the question message for Live AI
+                    if q_text:
+                        question_msg = (
+                            f"[USER'S EXACT QUESTION]: {q_text}\n"
+                            "Answer this specific question directly. "
+                            "Do not give a generic strategy overview. "
+                            "Use the intel briefing above as background only."
+                        )
+                        logger.info(f"[Engine] Sending question to Live AI: '{q_text[:80]}'")
+                    else:
+                        # Audio too short or transcription failed — ask for current best advice
+                        question_msg = (
+                            "[USER QUESTION]: (audio unclear) "
+                            "Give your single most important tactical recommendation right now."
+                        )
+                        logger.info("[Engine] Question audio unclear, sending fallback prompt")
+
+                    async with lock:
+                        await live_session.send_client_content(
+                            turns=types.Content(
+                                role="user",
+                                parts=[types.Part(text=question_msg)],
+                            ),
+                            turn_complete=True,
+                        )
+                except Exception as e:
+                    logger.warning(f"[Engine] Question handling failed: {e}")
+
+            asyncio.create_task(_handle_question(question_audio))
 
     @staticmethod
     async def handle_start_copilot(session: NegotiationSession, payload: dict, websocket: WebSocket) -> None:
         """
         Handle START_COPILOT message from frontend.
-
         Activates proactive monitoring mode on the already-open Live session.
-        The Live session was already opened at START_NEGOTIATION (D1). This handler:
-        1. Sets copilot_active flag (gates intel injections)
-        2. Sends priming injection with current negotiation context
-        3. Confirms activation to frontend
-
-        Contract C7 implementation.
         """
         # 1. Idempotency check — safe to press twice
         if session.copilot_active:
@@ -556,16 +722,20 @@ class NegotiationEngine:
             
             priming_text = (
                 "[LISTENER_INTEL: PRIMING]\n"
+                f"Negotiation Type: {last_context.get('negotiation_type') or 'unknown'}\n"
                 f"Item: {last_context.get('item') or 'unknown'}\n"
-                f"Seller Price: {last_context.get('seller_price')}\n"
-                f"Your Offer: {last_context.get('user_offer')}\n"
-                f"Your Target: {last_context.get('user_target_price')}\n"
-                f"Your Max: {last_context.get('user_max_price')}\n"
+                f"Counterparty Goal: {last_context.get('counterparty_goal') or 'unknown'}\n"
+                f"Seller Asking Price: {last_context.get('seller_asking_price')}\n"
+                f"Buyer Offer: {last_context.get('buyer_offer')}\n"
+                f"Counterparty Price: {last_context.get('counterparty_price')}\n"
+                f"User Price: {last_context.get('user_price')}\n"
+                f"User Target Price: {last_context.get('user_target_price')}\n"
+                f"User Walk-Away Price: {last_context.get('user_walk_away_price')}\n"
                 f"{market_info}\n"
                 f"Sentiment: {last_context.get('counterparty_sentiment', 'unknown')}\n"
                 f"Key Moments: {', '.join(last_context.get('key_moments', []))}\n"
                 f"Leverage Points: {', '.join(last_context.get('leverage_points', []))}\n"
-                f"Full Conversation Transcript: {accumulated_transcript}\n"
+                f"Full Conversation Transcript:\n{accumulated_transcript}\n"
                 "[/LISTENER_INTEL]"
             )
 
@@ -614,7 +784,7 @@ class NegotiationEngine:
         
         session.response_mode = mode
         logger.info(f"Response mode set to: {mode} [session={session.session_id}]")
-        
+  
         # Notify frontend of the mode change
         await websocket.send_json({
             "type": "RESPONSE_MODE_SET",
@@ -628,61 +798,139 @@ class NegotiationEngine:
         critical_events: list,
     ) -> None:
         """
-        Silently injects a clean, simplified transcript update into the Live AI session.
+        Injects the full negotiation intelligence into the Live AI session.
+        Called by the ListenerAgent every cycle and on critical events.
 
-        This function provides the AI with conversational context without overriding its
-        core persona. It is called by the ListenerAgent periodically and for critical
-        events.
-
-        THE FIX:
-        - Sends updates with role="user" to avoid conflicting with the role="system"
-          advisor prompt.
-        - Sends a simplified [CONVERSATION UPDATE] block instead of the complex
-          [LISTENER_INTEL] block to give pure context, not instructions.
-        - Uses turn_complete=False to signal that this is background information,
-          not a direct question that requires an immediate response.
+        Sends:
+        - All extracted fields (prices, sentiment, leverage, key moments)
+        - Market research results
+        - Full labeled conversation transcript
+        - Any critical events (anchor detected, pressure tactic, etc.)
         """
         if not session.copilot_active or session.live_session is None:
             return
 
         # Queue injections if a user interaction is in flight to prevent double responses.
-        if getattr(session, 'user_addressing_ai', False) or getattr(session, 'direct_query_in_flight', False) or getattr(session, 'ai_is_speaking', False):
+        if (getattr(session, 'user_addressing_ai', False)
+                or getattr(session, 'direct_query_in_flight', False)
+                or getattr(session, 'ai_is_speaking', False)):
             session.pending_injections.append((context, critical_events))
             logger.info(f"Queued injection (interaction in flight).")
             return
 
-        # Get the most recent transcript snippet for the update.
+        # ── Build full intel block ────────────────────────────────────────────
         accumulated_transcript = ""
         if session.listener_agent and session.listener_agent.accumulated_transcript:
-            accumulated_transcript = session.listener_agent.accumulated_transcript[-800:]
-        
-        if not accumulated_transcript.strip():
-            return # Don't send empty updates
+            accumulated_transcript = session.listener_agent.accumulated_transcript[-1500:]
 
-        # Build the simple, clean context block.
-        context_block = (
-            "[CONVERSATION UPDATE]\n"
-            f"{accumulated_transcript}\n"
-            "[/CONVERSATION UPDATE]"
+        if not accumulated_transcript.strip() and not context:
+            return
+
+        # Market research formatting
+        market_data = context.get("market_data")
+        market_info = "Not yet researched"
+        if market_data:
+            if isinstance(market_data, str):
+                market_info = market_data
+            elif isinstance(market_data, dict):
+                pr = market_data.get("price_range") or {}
+                facts    = market_data.get("key_facts", "")
+                leverage = market_data.get("leverage", "")
+                market_info = f"Fair range: {pr.get('min')} – {pr.get('max')} (avg {pr.get('average')})"
+                if facts:    market_info += f" | Facts: {facts}"
+                if leverage: market_info += f" | Leverage: {leverage}"
+
+        # Critical events block
+        events_text = ""
+        if critical_events:
+            lines = []
+            for evt in critical_events:
+                lines.append(f"  ⚠ {evt.get('event_type')}: {evt.get('detail', {})}")
+            events_text = "\nCRITICAL EVENTS:\n" + "\n".join(lines)
+
+        # Determine user role from negotiation type so labels are always correct.
+        # negotiation_type describes the transaction (buying_goods/selling_goods) but
+        # does NOT reliably tell us which side the USER is on — Flash infers it from
+        # audio context and may label it from the counterparty's perspective.
+        # The authoritative source is counterparty_price vs user_price combined with
+        # seller_asking_price vs buyer_offer.
+        negotiation_type = context.get('negotiation_type') or 'unknown'
+
+        # Derive user role: if user_price matches seller_asking_price → user is seller.
+        # If user_price matches buyer_offer → user is buyer.
+        # Fall back to negotiation_type only when prices are absent.
+        user_price_val_raw = context.get('user_price')
+        seller_asking = context.get('seller_asking_price')
+        buyer_offer_val = context.get('buyer_offer')
+        counterparty_price_raw = context.get('counterparty_price')
+
+        if user_price_val_raw is not None and seller_asking is not None and user_price_val_raw == seller_asking:
+            user_is_seller = True
+            user_is_buyer = False
+        elif user_price_val_raw is not None and buyer_offer_val is not None and user_price_val_raw == buyer_offer_val:
+            user_is_seller = False
+            user_is_buyer = True
+        else:
+            # Fall back to negotiation_type — treat as describing what the USER is doing
+            user_is_seller = negotiation_type == 'selling_goods'
+            user_is_buyer = negotiation_type == 'buying_goods'
+
+        if user_is_seller:
+            user_role = "SELLER (User is selling — counterparty is the buyer)"
+            user_price_label = "My asking price (User/Seller)"
+            counterparty_price_label = "Their offer (Counterparty/Buyer)"
+            user_price_val = seller_asking or user_price_val_raw
+            counterparty_price_val = buyer_offer_val or counterparty_price_raw
+        elif user_is_buyer:
+            user_role = "BUYER (User is buying — counterparty is the seller)"
+            user_price_label = "My offer (User/Buyer)"
+            counterparty_price_label = "Their asking price (Counterparty/Seller)"
+            user_price_val = buyer_offer_val or user_price_val_raw
+            counterparty_price_val = seller_asking or counterparty_price_raw
+        else:
+            user_role = negotiation_type
+            user_price_label = "User price"
+            counterparty_price_label = "Counterparty price"
+            user_price_val = user_price_val_raw
+            counterparty_price_val = counterparty_price_raw
+
+        intel_block = (
+            "[LISTENER_INTEL]\n"
+            f"Item: {context.get('item') or 'unknown'}\n"
+            f"Negotiation Type: {negotiation_type}\n"
+            f"User Role: {user_role}\n"
+            f"ROLE RULE: You are advising the USER. If the counterparty says they want to SELL, "
+            f"the user is BUYING. If the counterparty says they want to BUY, the user is SELLING. "
+            f"Always respond from the User's perspective.\n"
+            f"{counterparty_price_label}: {counterparty_price_val}\n"
+            f"{user_price_label}: {user_price_val}\n"
+            f"User Target Price: {context.get('user_target_price')}\n"
+            f"User Walk-Away Price: {context.get('user_walk_away_price')}\n"
+            f"Counterparty Sentiment: {context.get('counterparty_sentiment', 'unknown')}\n"
+            f"Counterparty Goal: {context.get('counterparty_goal', 'unknown')}\n"
+            f"Key moments: {'; '.join(context.get('key_moments', [])) or 'none'}\n"
+            f"Leverage points: {'; '.join(context.get('leverage_points', [])) or 'none'}\n"
+            f"Market research: {market_info}"
+            f"{events_text}\n"
+            f"\nCONVERSATION (User: = person you advise, Counterparty: = other party):\n{accumulated_transcript}\n"
+            "[/LISTENER_INTEL]"
         )
 
         logger.info(
-            "Injecting context update to Live AI",
-            extra={"session_id": session.session_id, "context_block": context_block},
+            f"Injecting full intel to Live AI ({len(intel_block)} chars) "
+            f"[session={session.session_id}]"
         )
 
         try:
             async with session.gemini_send_lock:
                 await session.live_session.send_client_content(
                     turns=types.Content(
-                        role="user",  # CRITICAL FIX: Use "user" role for context.
-                        parts=[types.Part(text=context_block)],
+                        role="user",
+                        parts=[types.Part(text=intel_block)],
                     ),
-                    turn_complete=False, # This is background intel, not a question.
+                    turn_complete=False,
                 )
-            
-            logger.info("Context injection successful.")
-
+            logger.info("Intel injection successful.")
         except Exception as exc:
             logger.warning(f"Context injection failed: {exc}")
 
@@ -726,28 +974,28 @@ class NegotiationEngine:
         )
 
     @staticmethod
-    async def _reconnect_live_session(session: NegotiationSession, websocket: WebSocket) -> None:
+    async def _reconnect_live_session(session: NegotiationSession, websocket: WebSocket, attempt: int = 1) -> None:
         """
-        Auto-reconnect the Gemini Live session after a fatal 1007 codec error.
+        Auto-reconnect the Gemini Live session after a connection drop.
 
-        The 1007 error occurs on gemini-live-2.5-flash-native-audio because after the model
-        generates Chirp 3 audio output, the WebSocket enters a state where raw PCM audio input
-        triggers: "audio/x-raw-tokens requires ContentChunk.tokens.token_ids to be set."
+        Handles 1006 (abnormal closure), 1007 (codec error), 1011 (keepalive ping timeout),
+        and any other recoverable WebSocket disconnects from the Gemini Live API.
 
         Recovery strategy:
           1. Close the broken session (it's already dead, so ignore close errors)
-          2. Open a fresh Live session — new sessions always accept raw PCM again
+          2. Open a fresh Live session with exponential backoff (max 3 attempts)
           3. Re-inject the last LISTENER_INTEL context to prime the new session
           4. Start a new receive_responses loop on the fresh session
 
-        The user experiences a ~0.5 s gap, then the copilot is fully operational again.
         All session state (transcript, strategy_history, copilot_active, etc.) is preserved.
         """
+        MAX_RECONNECT_ATTEMPTS = 3
         session_id = session.session_id
-        logger.info(f"[Reconnect] Starting Live session reconnect [{session_id}]")
+        logger.info(f"[Reconnect] Attempt {attempt}/{MAX_RECONNECT_ATTEMPTS} [{session_id}]")
 
-        # Brief pause so any in-flight sends can settle before we close
-        await asyncio.sleep(0.5)
+        # Exponential backoff: 0.5s, 2s, 5s
+        backoff = [0.5, 2.0, 5.0][min(attempt - 1, 2)]
+        await asyncio.sleep(backoff)
 
         # ── 1. Close the broken session ──────────────────────────────────────
         if session.live_session_cm:
@@ -769,20 +1017,27 @@ class NegotiationEngine:
             session.direct_query_in_flight = False
             session.pending_injections.clear()
 
-            logger.info(f"[Reconnect] New Live session opened [{session_id}]")
+            logger.info(f"[Reconnect] New Live session opened (attempt {attempt}) [{session_id}]")
 
         except Exception as e:
-            logger.error(f"[Reconnect] Failed to open new session [{session_id}]: {e}", exc_info=True)
-            try:
-                await websocket.send_json({
-                    "type": "AI_DEGRADED",
-                    "payload": {"message": "AI advisor reconnect failed. Please refresh."}
-                })
-            except Exception:
-                pass
+            logger.error(f"[Reconnect] Failed to open new session (attempt {attempt}) [{session_id}]: {e}", exc_info=True)
+            if attempt < MAX_RECONNECT_ATTEMPTS:
+                logger.info(f"[Reconnect] Retrying... [{session_id}]")
+                asyncio.create_task(
+                    NegotiationEngine._reconnect_live_session(session, websocket, attempt + 1)
+                )
+            else:
+                logger.error(f"[Reconnect] All {MAX_RECONNECT_ATTEMPTS} attempts failed [{session_id}]")
+                try:
+                    await websocket.send_json({
+                        "type": "AI_DEGRADED",
+                        "payload": {"message": "AI advisor reconnect failed after multiple attempts. Please refresh."}
+                    })
+                except Exception:
+                    pass
             return
 
-        # ── 3. Re-prime the new session with accumulated context ─────────────
+# ── 3. Re-prime the new session with accumulated context ─────────────
         if (session.copilot_active
                 and session.listener_agent
                 and session.listener_agent.last_context):
@@ -823,18 +1078,20 @@ class NegotiationEngine:
         
         intel_text = (
             "[LISTENER_INTEL]\n"
-            "ROLES: USER=BUYER (your client, wants to purchase at lowest price). "
-            "COUNTERPARTY=SELLER (asking Seller Price). Never swap these roles.\n"
+            f"Negotiation Type: {context.get('negotiation_type') or 'unknown'}\n"
             f"Item: {context.get('item') or 'unknown'}\n"
-            f"Seller Price: {context.get('seller_price')} ← COUNTERPARTY is asking this\n"
-            f"Your Offer: {context.get('user_offer')} ← USER (buyer) offered this\n"
-            f"Your Target: {context.get('user_target_price')} ← USER wants to pay this\n"
-            f"Your Max: {context.get('user_max_price')} ← USER's absolute ceiling\n"
+            f"Counterparty Goal: {context.get('counterparty_goal') or 'unknown'}\n"
+            f"Seller Asking Price: {context.get('seller_asking_price')}\n"
+            f"Buyer Offer: {context.get('buyer_offer')}\n"
+            f"Counterparty Price: {context.get('counterparty_price')}\n"
+            f"User Price: {context.get('user_price')}\n"
+            f"User Target Price: {context.get('user_target_price')}\n"
+            f"User Walk-Away Price: {context.get('user_walk_away_price')}\n"
             f"{market_info}\n"
             f"Sentiment: {context.get('counterparty_sentiment', 'unknown')}\n"
             f"Key Moments: {', '.join(context.get('key_moments', []))}\n"
             f"Leverage Points: {', '.join(context.get('leverage_points', []))}\n"
-            f"Recent Transcript: {accumulated_transcript or context.get('transcript_snippet', '')}\n"
+            f"Transcript:\n{accumulated_transcript or context.get('transcript_snippet', '')}\n"
             "[/LISTENER_INTEL]"
         )
 
@@ -893,7 +1150,7 @@ class NegotiationEngine:
                             role="system",
                             parts=[types.Part(text=block)],
                         ),
-                        turn_complete=False,
+                 turn_complete=False,
                     )
                 
                 if prompt_evaluation:
@@ -955,17 +1212,24 @@ class NegotiationEngine:
 
         await websocket.send_json({"type": "AI_THINKING", "payload": {}})
 
+        # Trigger an immediate extraction cycle so the query uses the freshest possible
+        # context rather than whatever was extracted up to POLL_INTERVAL seconds ago.
+        # Fire-and-forget — don't block the query on the Flash extraction.
+        if session.listener_agent:
+            session.listener_agent.force_immediate_cycle()
+
         try:
             # Gather the latest context from the listener and the user session.
             listener_ctx = session.listener_agent.last_context if session.listener_agent else {}
             user_ctx = session.user_context or {}
 
+            # Pass the full listener context so build_advisor_query has all fields.
+            # Overlay user-provided setup values (higher priority for target/walk-away).
             state_for_query = {
+                **listener_ctx,
                 "item":         listener_ctx.get("item") or user_ctx.get("item", ""),
-                "seller_price": listener_ctx.get("seller_price"), # Use listener's price first
-                "target_price": user_ctx.get("target_price"),
-                "max_price":    user_ctx.get("max_price"),
-                "market_data":  listener_ctx.get("market_data"),
+                "target_price": user_ctx.get("target_price") or listener_ctx.get("user_target_price"),
+                "max_price":    user_ctx.get("max_price") or listener_ctx.get("user_walk_away_price"),
             }
 
             # Use the full accumulated transcript from the listener for the richest context
@@ -989,7 +1253,7 @@ class NegotiationEngine:
                     "session_id": session.session_id,
                     "state_for_query": state_for_query,
                     "transcript_snippet": transcript_for_query[-500:], # Log last 500 chars
-                    "user_query": user_query_text,
+             "user_query": user_query_text,
                     "final_query": query,
                 },
             )
@@ -1014,11 +1278,11 @@ def _build_context_summary(session: NegotiationSession) -> str:
     last_strategy = {}
     if session.strategy_history:
         last_strategy = session.strategy_history[-1]
-    
+
     summary = f"Original Context: {original}\n"
     if last_strategy:
         summary += f"Last Strategy: {json.dumps(last_strategy)}\n"
-        
+
     recent_transcript = session.transcript[-10:] if session.transcript else []
     if recent_transcript:
         summary += "Recent Transcript:\n"
@@ -1026,5 +1290,5 @@ def _build_context_summary(session: NegotiationSession) -> str:
             speaker = entry.get("speaker", "Unknown")
             text = entry.get("text", "")
             summary += f"{speaker}: {text}\n"
-            
+
     return summary

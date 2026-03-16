@@ -1,352 +1,446 @@
-# AI Negotiation Copilot - Developer Handoff Package
+# AI Negotiation Copilot
 
-## 🎯 Project Overview
+A multimodal real-time negotiation assistant powered by Google Gemini Live API. It listens to your negotiation, analyzes context in real time, and gives you live strategic coaching so you can negotiate better prices, terms, and agreements.
 
-The **AI Negotiation Copilot** is a multimodal real-time negotiation assistant built for the Gemini Live Agent Challenge. It helps users obtain better prices, terms, and agreements during real-world negotiations by providing live strategic support through vision, voice, and text interaction.
-
-### Key Features
-- 📹 **Vision Analysis**: Captures and analyzes negotiation context from camera/screen
-- 🎤 **Voice Monitoring**: Real-time conversation transcription and analysis
-- 💡 **Strategic Guidance**: AI-powered negotiation recommendations
-- 📊 **Market Intelligence**: Automated price research and comparison
-- 🎯 **Dynamic Strategy**: Adaptive recommendations based on conversation flow
-- 📈 **Outcome Analysis**: Comprehensive deal effectiveness metrics
-
-### Technology Stack
-- **Frontend**: Next.js 14+, TypeScript, React, TailwindCSS
-- **Backend**: Python 3.11+, FastAPI, WebSockets
-- **AI Engine**: Google Gemini Multimodal Live API
-- **Deployment**: Google Cloud Run
-- **Development**: Windows 11 (PowerShell)
+Built for the **Gemini Live Agent Challenge**.
 
 ---
 
-## 📦 Package Contents
+## Table of Contents
 
-This Developer Handoff Package contains everything needed to build the application:
+- [Overview](#overview)
+- [Features](#features)
+- [Tech Stack](#tech-stack)
+- [Project Structure](#project-structure)
+- [Prerequisites](#prerequisites)
+- [Local Setup](#local-setup)
+- [Environment Variables](#environment-variables)
+- [How It Works](#how-it-works)
+- [WebSocket API](#websocket-api)
+- [Deployment](#deployment)
+- [Testing](#testing)
+- [Troubleshooting](#troubleshooting)
 
-### Documentation Files
-1. **ARCHITECTURE.md** - Complete system architecture, folder structure, data flows
-2. **API_CONTRACTS.md** - WebSocket events, message schemas, data models
-3. **AGENT_EXECUTION_PLAN.md** - Phased build approach with 8 phases
-4. **.agentrules** - Strict coding rules and best practices
-5. **MASTER_SYSTEM_PROMPT.txt** - Initialization prompt for coding agents
-6. **README.md** - This file
+---
 
-### What You'll Build
+## Overview
+
+The AI Negotiation Copilot sits in the background during a real-world negotiation (buying a car, negotiating a salary, closing a deal) and provides live AI coaching through voice and text.
+
+It uses a **dual-model architecture**:
+- **Gemini Live** — handles real-time voice interaction with the user
+- **Gemini Flash (ListenerAgent)** — runs in the background extracting prices, sentiment, and context from the conversation, then injects that intel into the Live session
+
+---
+
+## Features
+
+- Real-time voice capture and transcription for both speakers
+- Manual speaker identification (User / Counterparty buttons)
+- Live AI coaching via Gemini Live API with audio responses
+- Background market research via Google Search
+- Proactive Copilot mode — AI alerts you to critical moments automatically
+- Ask AI mode — hold a button to ask the AI a direct question mid-negotiation
+- Response modes: Advice (detailed explanation) or Command (tactical one-liner)
+- Session outcome summary with savings and effectiveness analysis
+- Auto-reconnect on Gemini Live session drops
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Frontend | Next.js 15, React 19, TypeScript, TailwindCSS |
+| Backend | Python 3.11+, FastAPI, Uvicorn |
+| AI | Google Gemini Live API, Gemini 2.0 Flash |
+| Real-time | WebSockets (binary audio + JSON control frames) |
+| Audio | Web Audio API (AudioWorklet) |
+| Logging | Pino (frontend), python-json-logger (backend) |
+| Testing | Vitest (frontend), pytest (backend) |
+| Deployment | Docker, Google Cloud Run |
+
+---
+
+## Project Structure
+
 ```
 ai-negotiation-copilot/
-├── frontend/          # Next.js application
-├── backend/           # FastAPI application
-├── infrastructure/    # Deployment configs
-├── docs/             # Documentation
-└── scripts/          # Utility scripts
+├── backend/
+│   ├── app/
+│   │   ├── main.py                   # FastAPI app entry point
+│   │   ├── config.py                 # Environment config (Pydantic Settings)
+│   │   ├── api/
+│   │   │   └── websocket.py          # WebSocket endpoint + message routing
+│   │   ├── models/
+│   │   │   ├── negotiation.py        # Session state machine (IDLE > CONSENTED > ACTIVE > ENDING)
+│   │   │   └── messages.py           # Pydantic models for all WebSocket message types
+│   │   ├── services/
+│   │   │   ├── gemini_client.py      # Gemini Live API integration
+│   │   │   ├── listener_agent.py     # Background context extraction (dual-model)
+│   │   │   ├── negotiation_engine.py # Message routing + business logic
+│   │   │   ├── market_research.py    # Google Search market intelligence
+│   │   │   ├── connection_manager.py # WebSocket session tracking
+│   │   │   ├── audio_buffer.py       # Circular audio buffer
+│   │   │   ├── response_validator.py # AI response validation
+│   │   │   └── master_prompt.py      # Gemini system prompt
+│   │   └── utils/
+│   │       └── logging_config.py     # Structured JSON logging
+│   ├── tests/                        # pytest test suite
+│   ├── requirements.txt              # Production dependencies
+│   ├── requirements-dev.txt          # Dev/test dependencies
+│   ├── .env.example                  # Environment variable template
+│   └── Dockerfile                    # Container config (port 8080)
+│
+├── frontend/
+│   ├── app/
+│   │   ├── page.tsx                  # Main page (dashboard entry point)
+│   │   ├── layout.tsx                # Root layout
+│   │   └── globals.css               # Global styles
+│   ├── components/
+│   │   ├── negotiation/              # NegotiationDashboard + strategy UI
+│   │   ├── enrollment/               # Speaker enrollment components
+│   │   └── ui/                       # Reusable UI components
+│   ├── hooks/
+│   │   ├── useNegotiation.ts         # Core hook: WebSocket + audio management
+│   │   ├── useNegotiationState.ts    # Negotiation state reducer
+│   │   └── useAskAI.ts               # Ask AI button logic
+│   ├── lib/
+│   │   ├── websocket.ts              # WebSocket client (text + binary frames)
+│   │   ├── types.ts                  # TypeScript interfaces for all message types
+│   │   └── audio-worklet-manager.ts  # Mic capture + speaker playback
+│   ├── utils/
+│   │   ├── api.ts                    # API helpers
+│   │   └── logger.ts                 # Pino logger
+│   ├── tests/                        # Vitest test suite
+│   ├── package.json
+│   └── next.config.js
+│
+├── README.md
+└── .gitignore
 ```
 
 ---
 
-## 🚀 Quick Start for Coding Agents
+## Prerequisites
 
-If you're an autonomous coding agent (OpenCode/OpenClaw/etc.), follow these steps:
+- **Node.js** 18+ LTS — https://nodejs.org
+- **Python** 3.11+ — https://python.org
+- **Git** — https://git-scm.com
+- **Google Gemini API Key** — https://aistudio.google.com/app/apikey
 
-### Step 1: Read Documentation
-```
-1. Read ARCHITECTURE.md completely
-2. Read API_CONTRACTS.md completely
-3. Read AGENT_EXECUTION_PLAN.md completely
-4. Read .agentrules completely
-5. Read MASTER_SYSTEM_PROMPT.txt completely
-```
-
-### Step 2: Initialize Your Context
-Copy the contents of **MASTER_SYSTEM_PROMPT.txt** into your system prompt or context window.
-
-### Step 3: Begin Execution
-Start with **Phase 0** from AGENT_EXECUTION_PLAN.md and proceed sequentially through all 8 phases.
-
-### Step 4: Verify Each Phase
-After completing each phase, verify all functionality works on Windows before proceeding.
+Optional (for deployment):
+- **Docker** — https://docker.com
+- **Google Cloud SDK** — https://cloud.google.com/sdk
 
 ---
 
-## 🛠️ Manual Setup (For Human Developers)
+## Local Setup
 
-### Prerequisites
-- Windows 11
-- Python 3.11+
-- Node.js 18+ LTS
-- Git
-- Google Cloud SDK
-- Gemini API access
+### 1. Clone the repository
 
-### Environment Setup
-
-**1. Clone/Create Project**
-```powershell
-mkdir ai-negotiation-copilot
+```bash
+git clone https://github.com/your-username/ai-negotiation-copilot.git
 cd ai-negotiation-copilot
-git init
 ```
 
-**2. Set Up Backend**
-```powershell
-mkdir backend
+### 2. Backend setup
+
+```bash
 cd backend
+
+# Create and activate a virtual environment
 python -m venv venv
-.\venv\Scripts\activate
-pip install fastapi uvicorn websockets python-dotenv google-generativeai pydantic pillow
+
+# Windows
+venv\Scripts\activate
+
+# macOS / Linux
+source venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Copy the environment template
+cp .env.example .env
 ```
 
-**3. Set Up Frontend**
-```powershell
-cd ..\frontend
-npx create-next-app@latest . --typescript --tailwind --app
+Open `backend/.env` and fill in your values:
+
+```env
+GEMINI_API_KEY=your_gemini_api_key_here
+GEMINI_MODEL=gemini-2.5-flash-native-audio-preview-12-2025
+GEMINI_MODEL_FALLBACK=gemini-2.0-flash-live-preview-04-09
+CORS_ORIGINS=http://localhost:3000
+LOG_LEVEL=INFO
+SESSION_TTL_SECONDS=3600
+```
+
+### 3. Frontend setup
+
+```bash
+cd frontend
 npm install
 ```
 
-**4. Configure Environment**
-Create `backend/.env`:
-```
-GOOGLE_CLOUD_PROJECT=your-project-id
-GEMINI_API_KEY=your-api-key
-GEMINI_MODEL=gemini-2.0-flash-exp
-CORS_ORIGINS=["http://localhost:3000"]
+The frontend auto-connects to `ws://localhost:8000/ws`. To override, create `frontend/.env.local`:
+
+```env
+NEXT_PUBLIC_WS_URL=ws://localhost:8000/ws
 ```
 
-**5. Start Development Servers**
-```powershell
-# Terminal 1 - Backend
+### 4. Run the app
+
+Open two terminals:
+
+**Terminal 1 — Backend:**
+
+```bash
 cd backend
-.\venv\Scripts\activate
-uvicorn app.main:app --reload
+venv\Scripts\activate        # Windows
+# source venv/bin/activate   # macOS/Linux
 
-# Terminal 2 - Frontend
+uvicorn app.main:app --reload --port 8000
+```
+
+Backend runs at `http://localhost:8000`
+Health check: `http://localhost:8000/health`
+
+**Terminal 2 — Frontend:**
+
+```bash
 cd frontend
 npm run dev
 ```
 
----
+Frontend runs at `http://localhost:3000`
 
-## 📋 Development Phases
-
-The project is built in 8 sequential phases:
-
-| Phase | Focus | Key Deliverables |
-|-------|-------|------------------|
-| 0 | Project Initialization | Folder structure, dependencies |
-| 1 | Backend Skeleton | FastAPI app, health checks |
-| 2 | WebSocket Infrastructure | Bidirectional communication |
-| 3 | Gemini Integration | Real AI API connection |
-| 4 | Frontend Foundation | Next.js app, WebSocket client |
-| 5 | Media Capture | Camera/mic access, streaming |
-| 6 | Negotiation Intelligence | Context, market, strategy services |
-| 7 | UI Polish & Testing | Complete UI, tests |
-| 8 | Deployment | Docker, Cloud Run |
-
-**See AGENT_EXECUTION_PLAN.md for detailed tasks and verification steps.**
+Open http://localhost:3000 in your browser and grant microphone permissions when prompted.
 
 ---
 
-## 🏗️ Architecture Overview
+## Environment Variables
 
-### Data Flow
+### Backend (`backend/.env`)
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `GEMINI_API_KEY` | Yes | — | Your Google Gemini API key |
+| `GEMINI_MODEL` | No | `gemini-2.5-flash-native-audio-preview-12-2025` | Primary Gemini Live model |
+| `GEMINI_MODEL_FALLBACK` | No | `gemini-2.0-flash-live-preview-04-09` | Fallback model on session drop |
+| `CORS_ORIGINS` | No | `http://localhost:3000` | Comma-separated allowed origins |
+| `LOG_LEVEL` | No | `INFO` | DEBUG, INFO, WARNING, or ERROR |
+| `SESSION_TTL_SECONDS` | No | `3600` | Session timeout in seconds |
+| `GOOGLE_CLOUD_PROJECT` | yes | — | GCP project ID (Vertex AI only) |
+| `GOOGLE_APPLICATION_CREDENTIALS` | yes | — | Path to GCP service account JSON (Vertex AI only) |
+| `GOOGLE_GENAI_USE_VERTEXAI` | yes | false` | Use Vertex AI instead of Gemini API |
+
+### Frontend (`frontend/.env.local`)
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `NEXT_PUBLIC_WS_URL` | No | `ws://<host>:8000/ws` | Backend WebSocket URL |
+
+---
+
+## How It Works
+
+### Session flow
+
 ```
-User Browser
-    ↓ (getUserMedia)
-Camera/Microphone
-    ↓ (WebSocket)
-FastAPI Backend
-    ↓ (Streaming)
-Gemini Live API
-    ↓ (Analysis)
-Negotiation Engine
-    ↓ (WebSocket)
-Frontend UI Updates
+Browser
+  |
+  |-- Connects to WebSocket (/ws)
+  |-- Grants privacy consent
+  |-- Clicks "Start Negotiation"
+  |     |-- Mic capture starts (16kHz PCM, binary frames)
+  |     |-- Gemini Live session opens
+  |
+  |-- User / Counterparty speaks
+  |     |-- Audio chunks stream to backend
+  |     |-- Gemini Live transcribes and analyzes
+  |     |-- ListenerAgent extracts context in background
+  |
+  |-- AI sends back:
+  |     |-- TRANSCRIPT_UPDATE  (speaker + text)
+  |     |-- STATE_UPDATE       (item, prices, sentiment)
+  |     |-- RESEARCH_COMPLETE  (market data)
+  |     |-- AI_RESPONSE        (coaching advice)
+  |
+  |-- Clicks "End Negotiation"
+        |-- OUTCOME_SUMMARY sent (savings, effectiveness score)
 ```
 
-### Key Components
+### Dual-model architecture
 
-**Frontend**
-- `VideoCapture.tsx` - Camera/screen capture
-- `AudioMonitor.tsx` - Microphone input
-- `NegotiationDashboard.tsx` - Strategy display
-- `RecommendationPanel.tsx` - AI suggestions
-- `OutcomeSummary.tsx` - Final analysis
+- **Gemini Live** — Real-time voice conversation. The user can speak directly to it by holding the "Ask AI" button. It responds with audio.
+- **Gemini Flash (ListenerAgent)** — Runs continuously in the background, analyzing the negotiation audio. Extracts prices, sentiment, and leverage points. Injects this as `LISTENER_INTEL` into the Live session so the AI gives informed advice.
 
-**Backend**
-- `websocket.py` - WebSocket endpoint
-- `gemini_client.py` - Gemini API integration
-- `context_analyzer.py` - Vision analysis
-- `market_analyzer.py` - Price research
-- `strategy_generator.py` - Recommendation engine
-- `negotiation_engine.py` - Orchestration
+### Speaker identification
+
+Click the "User" or "Counterparty" button before each person speaks. The backend labels the transcript accordingly. No automatic voice fingerprinting required.
 
 ---
 
-## 🔌 API Reference
+## WebSocket API
 
-### WebSocket Events
+All communication happens over a single WebSocket at `/ws`. Text frames carry JSON control messages. Binary frames carry raw PCM audio.
 
-**Client → Server**
-- `PRIVACY_CONSENT_GRANTED` - User grants audio monitoring permission
-- `START_NEGOTIATION` - Begin new session
-- `VISION_FRAME` - Send captured image
-- `AUDIO_CHUNK` - Stream audio data
-- `USER_MESSAGE` - Text message to AI
-- `END_NEGOTIATION` - Finish session
+### Client to Server
 
-**Server → Client**
-- `CONNECTION_ESTABLISHED` - Connection confirmed
-- `SESSION_STARTED` - Session initialized
-- `CONTEXT_EXTRACTED` - Vision analysis results
-- `STRATEGY_UPDATE` - New negotiation strategy
-- `TRANSCRIPT_UPDATE` - Conversation transcription
-- `AI_RESPONSE` - AI recommendation
-- `OUTCOME_SUMMARY` - Final deal analysis
+| Message | Description |
+|---|---|
+| `PRIVACY_CONSENT_GRANTED` | User accepts audio monitoring |
+| `START_NEGOTIATION` | Begin session with optional context string |
+| `SPEAKER_IDENTIFIED` | Manual speaker label (`user` or `counterparty`) |
+| `SPEAKER_STOPPED` | VAD detected silence |
+| `USER_ADDRESSING_AI` | User is holding the Ask AI button |
+| `START_COPILOT` | Activate proactive monitoring mode |
+| `SET_RESPONSE_MODE` | Set AI response style (`advice` or `command`) |
+| `END_NEGOTIATION` | End session with optional final/initial price |
+| `VISION_FRAME` | Send base64 image for visual context |
 
-**See API_CONTRACTS.md for complete schemas and examples.**
+Binary frames: raw 16kHz Int16 PCM audio chunks.
+
+### Server to Client
+
+| Message | Description |
+|---|---|
+| `CONNECTION_ESTABLISHED` | WebSocket ready, session ID assigned |
+| `CONSENT_ACKNOWLEDGED` | Consent recorded |
+| `SESSION_STARTED` | Gemini Live connected |
+| `TRANSCRIPT_UPDATE` | New transcript line (speaker + text) |
+| `STATE_UPDATE` | Extracted negotiation context (item, prices, sentiment) |
+| `RESEARCH_STARTED` / `RESEARCH_COMPLETE` | Market research progress |
+| `AI_RESPONSE` | AI coaching text |
+| `STRATEGY_UPDATE` | Recommended negotiation strategy |
+| `OUTCOME_SUMMARY` | Final deal analysis |
+| `AI_CONNECTING` / `AI_LISTENING` / `AI_THINKING` / `AI_SPEAKING` | AI state indicators |
+| `COPILOT_STARTED` | Proactive mode activated |
+| `RESPONSE_MODE_SET` | Mode confirmation |
+| `SESSION_RECONNECTING` | Auto-reconnect in progress |
+| `AI_DEGRADED` | Feature degradation notice |
+| `ERROR` | Error with code and message |
+
+Binary frames from server: 24kHz Int16 PCM audio (Gemini voice response).
 
 ---
 
-## 🧪 Testing
+## Deployment
 
-### Backend Tests
-```powershell
+### Docker
+
+```bash
+# Build backend image
+docker build -t negotiation-backend ./backend
+
+# Run backend
+docker run -p 8080:8080 \
+  -e GEMINI_API_KEY=your_key_here \
+  -e CORS_ORIGINS=https://your-frontend-url.com \
+  negotiation-backend
+```
+
+The backend Dockerfile uses `python:3.11-slim`, runs as a non-root user, exposes port `8080`, and includes a health check at `/health`.
+
+For the frontend, create `frontend/Dockerfile`:
+
+```dockerfile
+FROM node:18-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
+
+FROM node:18-alpine AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=builder /app/.next/standalone ./
+COPY --from=builder /app/.next/static ./.next/static
+COPY --from=builder /app/public ./public
+EXPOSE 3000
+CMD ["node", "server.js"]
+```
+
+### Google Cloud Run
+
+```bash
+# Authenticate
+gcloud auth login
+gcloud config set project YOUR_PROJECT_ID
+
+# Deploy backend
+gcloud run deploy negotiation-backend \
+  --source ./backend \
+  --region us-central1 \
+  --allow-unauthenticated \
+  --set-env-vars GEMINI_API_KEY=your_key,CORS_ORIGINS=https://your-frontend-url.com
+
+# Deploy frontend
+gcloud run deploy negotiation-frontend \
+  --source ./frontend \
+  --region us-central1 \
+  --allow-unauthenticated \
+  --set-env-vars NEXT_PUBLIC_WS_URL=wss://your-backend-url/ws
+```
+
+After deploying the backend, update `NEXT_PUBLIC_WS_URL` in the frontend deployment to point to the backend Cloud Run URL. Use `wss://` (not `ws://`) for HTTPS deployments.
+
+For production, store `GEMINI_API_KEY` in Google Secret Manager and reference it in Cloud Run instead of passing it as a plain environment variable.
+
+---
+
+## Testing
+
+### Backend
+
+```bash
 cd backend
-.\venv\Scripts\activate
+venv\Scripts\activate   # Windows / source venv/bin/activate on macOS/Linux
+
+pip install -r requirements-dev.txt
+
 pytest tests/ -v
 ```
 
-### Frontend Tests
-```powershell
+### Frontend
+
+```bash
 cd frontend
-npm test
+
+npm test                  # Run once
+npm run test:coverage     # With coverage report
+npm run test:ui           # Interactive UI
 ```
 
-### Manual Testing
-1. Start both servers
-2. Open http://localhost:3000
-3. Grant camera/microphone permissions
-4. Point camera at price tag or product
-5. Speak to test audio capture
-6. Verify AI responses appear
+---
+
+## Troubleshooting
+
+**Microphone not working**
+- You must be on `http://localhost:3000` or an HTTPS URL — browsers block mic access on other origins.
+- Check that you granted microphone permission in the browser prompt.
+
+**WebSocket connection fails**
+- Confirm the backend is running: `http://localhost:8000/health` should return `{"status": "healthy"}`.
+- Check that `CORS_ORIGINS` in `backend/.env` includes `http://localhost:3000`.
+
+**Gemini API errors**
+- Verify `GEMINI_API_KEY` is set correctly in `backend/.env`.
+- Confirm the model name in `GEMINI_MODEL` is available in your account/region.
+- The app automatically falls back to `GEMINI_MODEL_FALLBACK` on session drops.
+
+**Audio playback issues**
+- The browser requires a user gesture before audio can play — click anywhere on the page first.
+- Corrupted audio is usually a codec mismatch; the fallback model handles this automatically.
+
+**CORS errors in browser console**
+- `CORS_ORIGINS` must exactly match the frontend origin including protocol and port.
+- Example: `CORS_ORIGINS=http://localhost:3000`
 
 ---
 
-## 🚢 Deployment
+## License
 
-### Build Docker Images
-```powershell
-docker build -t negotiation-backend ./backend
-docker build -t negotiation-frontend ./frontend
-```
-
-### Deploy to Cloud Run
-```powershell
-gcloud run deploy negotiation-backend --source ./backend --region us-central1
-gcloud run deploy negotiation-frontend --source ./frontend --region us-central1
-```
-
-### Environment Variables (Production)
-Set in Cloud Run:
-- `GOOGLE_CLOUD_PROJECT`
-- `GEMINI_API_KEY`
-- `CORS_ORIGINS` (frontend URL)
-
----
-
-## 📖 Documentation Structure
-
-### For Understanding
-- **README.md** (this file) - Overview and quick start
-- **ARCHITECTURE.md** - System design and data flows
-
-### For Implementation
-- **API_CONTRACTS.md** - Message schemas and contracts
-- **AGENT_EXECUTION_PLAN.md** - Step-by-step build guide
-- **.agentrules** - Coding standards and rules
-
-### For Agents
-- **MASTER_SYSTEM_PROMPT.txt** - Complete initialization prompt
-
----
-
-## ⚠️ Critical Rules
-
-### ALWAYS
-- ✅ Use PowerShell commands (Windows environment)
-- ✅ Use official Gemini SDK (no mocking)
-- ✅ Handle errors gracefully
-- ✅ Test on Windows after each change
-- ✅ Verify phase completion before proceeding
-
-### NEVER
-- ❌ Use bash/sh commands
-- ❌ Mock the Gemini API
-- ❌ Skip error handling
-- ❌ Commit secrets to git
-- ❌ Skip phase verification
-
-**See .agentrules for complete list.**
-
----
-
-## 🎯 Success Criteria
-
-The project is complete when:
-- ✅ All 8 phases finished and verified
-- ✅ End-to-end negotiation flow works
-- ✅ Real Gemini API integration functional
-- ✅ Deployed to Google Cloud Run
-- ✅ All documentation complete
-- ✅ Ready for hackathon submission
-
----
-
-## 🏆 Gemini Live Agent Challenge
-
-This project is built for the **Gemini Live Agent Challenge** in the **Live Agent** category.
-
-### Judging Criteria
-- **Innovation & Multimodal UX (40%)**: Beyond text-box interaction, seamless multimodal experience
-- **Technical Implementation (30%)**: Google Cloud native, robust architecture, error handling
-- **Demo & Presentation (30%)**: Clear problem/solution, working software, architecture proof
-
-### Submission Requirements
-- ✅ Uses Gemini Live API
-- ✅ Hosted on Google Cloud
-- ✅ Handles barge-in naturally
-- ✅ Public code repository
-- ✅ Demo video (max 4 minutes)
-- ✅ Architecture diagram
-- ✅ Proof of GCP deployment
-
----
-
-## 📞 Support
-
-### For Coding Agents
-- Refer to MASTER_SYSTEM_PROMPT.txt for complete instructions
-- Follow AGENT_EXECUTION_PLAN.md phase by phase
-- Consult .agentrules when making decisions
-
-### For Human Developers
-- Review ARCHITECTURE.md for system design
-- Check API_CONTRACTS.md for integration details
-- Follow AGENT_EXECUTION_PLAN.md for build sequence
-
----
-
-## 📄 License
-
-This project is built for the Gemini Live Agent Challenge. All intellectual property rights remain with the developer as per contest rules.
-
----
-
-## 🚀 Ready to Build?
-
-**For Coding Agents**: Start by reading MASTER_SYSTEM_PROMPT.txt
-
-**For Human Developers**: Begin with Phase 0 in AGENT_EXECUTION_PLAN.md
-
-**Good luck building an amazing AI Negotiation Copilot!** 🎉
+Built for the Gemini Live Agent Challenge. All rights reserved by the developer.
