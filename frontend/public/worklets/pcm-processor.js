@@ -18,7 +18,7 @@ class PCMCaptureProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     this._buffer = [];
-    this._bufferSize = 1600;        // 100 ms at 16 kHz
+    this._bufferSize = 800;         // 50 ms at 16 kHz — lower latency
     this._targetSampleRate = 16000;
 
     // Integer phase accumulator for drift-free resampling

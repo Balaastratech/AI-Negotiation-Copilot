@@ -1,24 +1,20 @@
 import React from 'react';
 import { NegotiationState } from '../../lib/types';
 import { NegotiationState as ButtonTriggeredState, ValidationError } from '../../hooks/useNegotiationState';
-import { VoiceFingerprint } from '../../lib/voice-fingerprint';
 import { PrivacyConsent } from './PrivacyConsent';
 import { VideoCapture } from './VideoCapture';
 import { TranscriptPanel } from './TranscriptPanel';
-import { StrategyPanel } from './StrategyPanel';
 import { ControlBar } from './ControlBar';
 import { AIStateIndicator } from './AIStateIndicator';
 import { ValidationErrors } from './ValidationErrors';
 import { NegotiationStateCard } from './NegotiationStateCard';
 import { ResearchIndicator } from './ResearchIndicator';
 import { AskAIButton } from './AskAIButton';
-import { ManualSpeakerSelector } from './ManualSpeakerSelector';
 
 interface NegotiationDashboardProps {
   state: NegotiationState;
   negotiationState: ButtonTriggeredState;
   validationErrors: ValidationError[];
-  voiceFingerprint: VoiceFingerprint | null;
   onConsent: () => void;
   onToggleAudio: () => void;
   onToggleVision: () => void;
@@ -33,202 +29,229 @@ interface NegotiationDashboardProps {
   currentSpeaker?: 'user' | 'counterparty' | null;
   responseMode?: 'advice' | 'command' | null;
   aiLiveTranscription?: string | null;
+  liveTranscript?: import('../../lib/types').TranscriptEntry[];
 }
 
 export function NegotiationDashboard({
-  state,
-  negotiationState,
-  validationErrors,
-  voiceFingerprint,
-  onConsent,
-  onToggleAudio,
-  onToggleVision,
-  onStartNegotiation,
-  onEndNegotiation,
-  onStartCopilot,
-  onGetAdvice,
-  onGetCommand,
-  onUserAddressingAI,
-  isAILoading,
-  onSpeakerSelected,
-  currentSpeaker,
-  responseMode,
-  aiLiveTranscription
+  state, negotiationState, validationErrors,
+  onConsent, onToggleAudio, onToggleVision,
+  onStartNegotiation, onEndNegotiation, onStartCopilot,
+  onGetAdvice, onGetCommand, onUserAddressingAI,
+  isAILoading, onSpeakerSelected, currentSpeaker,
+  responseMode, aiLiveTranscription, liveTranscript = [],
 }: NegotiationDashboardProps) {
   const [isAddressingAI, setIsAddressingAI] = React.useState(false);
   const longPressTimerRef = React.useRef<NodeJS.Timeout | null>(null);
 
   const handlePointerDown = React.useCallback(() => {
-    console.log('[DEBUG] handlePointerDown called, copilotActive:', state.copilotActive);
-    
-    if (!state.copilotActive) {
-      console.log('[DEBUG] Copilot not active, ignoring press');
-      return;
-    }
-    
-    console.log('[DEBUG] Starting 600ms timer for hold detection');
+    if (!state.copilotActive) return;
     longPressTimerRef.current = setTimeout(() => {
-      console.log('[DEBUG] Hold threshold reached, activating AI');
-      // Haptic feedback
-      if (navigator.vibrate) {
-        navigator.vibrate(30);
-      }
+      if (navigator.vibrate) navigator.vibrate(30);
       setIsAddressingAI(true);
       onUserAddressingAI(true);
     }, 600);
   }, [state.copilotActive, onUserAddressingAI]);
 
   const handlePointerEnd = React.useCallback(() => {
-    console.log('[DEBUG] handlePointerEnd called, isAddressingAI:', isAddressingAI);
-    
-    if (longPressTimerRef.current) {
-      clearTimeout(longPressTimerRef.current);
-      longPressTimerRef.current = null;
-    }
-    
-    if (isAddressingAI) {
-      console.log('[DEBUG] Deactivating AI');
-      setIsAddressingAI(false);
-      onUserAddressingAI(false);
-    }
+    if (longPressTimerRef.current) { clearTimeout(longPressTimerRef.current); longPressTimerRef.current = null; }
+    if (isAddressingAI) { setIsAddressingAI(false); onUserAddressingAI(false); }
   }, [isAddressingAI, onUserAddressingAI]);
 
-  if (!state.consentGiven) {
-    return <PrivacyConsent onAccept={onConsent} />;
-  }
+  if (!state.consentGiven) return <PrivacyConsent onAccept={onConsent} />;
 
   return (
-    <div 
-      className="flex flex-col h-screen w-full bg-neutral-100 overflow-hidden"
+    <div
+      className="flex flex-col h-screen w-full overflow-hidden relative"
       onPointerDown={handlePointerDown}
       onPointerUp={handlePointerEnd}
       onPointerCancel={handlePointerEnd}
       onMouseLeave={handlePointerEnd}
+      style={{ background: 'linear-gradient(135deg, #0b0b14 0%, #10101e 50%, #0b0b14 100%)' }}
     >
-      {/* AI State Indicator - shows listening/thinking/speaking */}
+      {/* Blurred ambient blobs — like the reference image background */}
+      <div className="pointer-events-none absolute inset-0 overflow-hidden">
+        <div className="absolute -top-32 left-1/4 w-96 h-96 rounded-full opacity-20"
+          style={{ background: 'radial-gradient(circle, #f5c518 0%, transparent 70%)', filter: 'blur(60px)' }} />
+        <div className="absolute top-1/3 -right-24 w-72 h-72 rounded-full opacity-15"
+          style={{ background: 'radial-gradient(circle, #c084fc 0%, transparent 70%)', filter: 'blur(50px)' }} />
+        <div className="absolute bottom-1/4 -left-16 w-64 h-64 rounded-full opacity-12"
+          style={{ background: 'radial-gradient(circle, #60a5fa 0%, transparent 70%)', filter: 'blur(50px)' }} />
+        <div className="absolute bottom-0 right-1/3 w-80 h-48 rounded-full opacity-10"
+          style={{ background: 'radial-gradient(circle, #f5c518 0%, transparent 70%)', filter: 'blur(60px)' }} />
+      </div>
+
       <AIStateIndicator state={state.aiState} />
+      <ResearchIndicator isResearching={negotiationState.isResearching} progress={negotiationState.researchProgress} />
 
-      {/* Manual Speaker Selector - only show when negotiation is active */}
-      {state.isNegotiating && onSpeakerSelected && (
-        <div className="px-4 pt-4">
-          <ManualSpeakerSelector 
-            onSpeakerSelected={onSpeakerSelected}
-            currentSpeaker={currentSpeaker || null}
-          />
-        </div>
-      )}
-
-      {/* Research Indicator - shows when researching market data */}
-      <ResearchIndicator 
-        isResearching={negotiationState.isResearching} 
-        progress={negotiationState.researchProgress} 
-      />
-
-      {/* Validation Errors - shows state validation issues */}
       {validationErrors.length > 0 && (
-        <div className="px-6 pt-4">
-          <ValidationErrors errors={validationErrors} />
-        </div>
+        <div className="px-6 pt-4 relative z-10"><ValidationErrors errors={validationErrors} /></div>
       )}
 
-      {/* Voice Fingerprint Status */}
-      {voiceFingerprint && (
-        <div className="px-6 pt-2">
-          <div className="text-xs text-green-600 flex items-center gap-2">
-            <span>✓</span>
-            <span>Voice fingerprint active ({voiceFingerprint.mean.length} coefficients)</span>
+      {/* Main Content */}
+      <div className="flex-1 flex overflow-hidden p-4 gap-4 relative z-10">
+
+        {/* Left Column */}
+        <div className="w-[55%] flex flex-col gap-4 min-w-0">
+
+          {/* Camera + Speaker selector */}
+          <div className="shrink-0 flex gap-3 h-52">
+
+            {/* Camera */}
+            <div className="flex-1 rounded-2xl overflow-hidden"
+              style={{
+                border: '1px solid rgba(255,255,255,0.12)',
+                boxShadow: '0 8px 32px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.08)',
+              }}>
+              <VideoCapture isActive={state.isVisionActive} onToggle={onToggleVision} />
+            </div>
+
+            {/* Speaker selector — frosted glass card */}
+            <div className="flex-1 rounded-2xl flex flex-col items-center justify-center p-4 gap-3"
+              style={{
+                background: 'rgba(255,255,255,0.06)',
+                backdropFilter: 'blur(40px) saturate(200%)',
+                border: '1px solid rgba(255,255,255,0.13)',
+                boxShadow: '0 8px 32px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.1)',
+              }}>
+              <span className="text-[10px] font-bold uppercase tracking-[0.2em]"
+                style={{ color: '#f5c518', textShadow: '0 0 10px rgba(245,197,24,0.5)' }}>
+                Who is speaking?
+              </span>
+              <div className="flex flex-col gap-2 w-full">
+                <button
+                  onClick={() => onSpeakerSelected?.('user')}
+                  disabled={!state.isNegotiating}
+                  className={`w-full py-3 rounded-xl text-sm font-bold transition-all duration-200 ${!state.isNegotiating ? 'opacity-25 cursor-not-allowed' : 'hover:scale-[1.02] active:scale-[0.98]'}`}
+                  style={currentSpeaker === 'user'
+                    ? { background: 'linear-gradient(135deg, #f5c518, #ffd700)', color: '#0b0b14', boxShadow: '0 4px 20px rgba(245,197,24,0.5), inset 0 1px 0 rgba(255,255,255,0.3)' }
+                    : { background: 'rgba(255,255,255,0.07)', color: 'rgba(255,255,255,0.92)', border: '1px solid rgba(255,255,255,0.12)' }}
+                >
+                  🙋 Me
+                </button>
+                <button
+                  onClick={() => onSpeakerSelected?.('counterparty')}
+                  disabled={!state.isNegotiating}
+                  className={`w-full py-3 rounded-xl text-sm font-bold transition-all duration-200 ${!state.isNegotiating ? 'opacity-25 cursor-not-allowed' : 'hover:scale-[1.02] active:scale-[0.98]'}`}
+                  style={currentSpeaker === 'counterparty'
+                    ? { background: 'linear-gradient(135deg, #f5c518, #ffd700)', color: '#0b0b14', boxShadow: '0 4px 20px rgba(245,197,24,0.5), inset 0 1px 0 rgba(255,255,255,0.3)' }
+                    : { background: 'rgba(255,255,255,0.07)', color: 'rgba(255,255,255,0.92)', border: '1px solid rgba(255,255,255,0.12)' }}
+                >
+                  🤝 Counterparty
+                </button>
+              </div>
+              <span className="text-[10px]" style={{ color: 'rgba(245,197,24,0.5)' }}>
+                {state.isNegotiating ? 'Tap to switch' : 'Start session to enable'}
+              </span>
+            </div>
+          </div>
+
+          {/* Transcript panels */}
+          <div className="flex-1 min-h-0 flex gap-3">
+            <div className="flex-1 min-w-0">
+              {/* Real negotiation only — excludes AI responses and anything the user said to AI */}
+              <TranscriptPanel
+                entries={state.transcript.filter(e => e.speaker !== 'ai' && e.context !== 'ask_ai')}
+                title="Conversation"
+              />
+            </div>
+            <div className="flex-1 min-w-0">
+              {/* AI Advisor — AI responses + what the user asked the AI */}
+              <TranscriptPanel
+                entries={state.transcript.filter(e => e.speaker === 'ai' || e.context === 'ask_ai')}
+                title="AI Advisor"
+              />
+            </div>
           </div>
         </div>
-      )}
 
-      {/* Main Content Area */}
-      <div className="flex-1 flex overflow-hidden p-6 gap-6">
-
-        {/* Left Column: Video and Transcript */}
-        <div className="w-1/3 flex flex-col gap-6 min-w-[350px]">
-          {/* Video Feed */}
-          <div className="shrink-0 rounded-xl overflow-hidden shadow-sm bg-black border border-neutral-300 h-64">
-            <VideoCapture
-              isActive={state.isVisionActive}
-              onToggle={onToggleVision}
-            />
-          </div>
-
-          {/* Transcript Panel */}
-          <div className="flex-1 min-h-0">
-            <TranscriptPanel entries={state.transcript} />
-          </div>
-        </div>
-
-        {/* Right Column: Strategy Panel and Negotiation State */}
-        <div className="flex-1 min-w-[500px] flex flex-col gap-6">
-          <div className="flex-1 min-h-0">
-            <StrategyPanel strategy={state.strategy} />
-          </div>
-          
-          {/* Negotiation State Card - shows extracted state + listener status */}
-          <div className="shrink-0">
+        {/* Right Column */}
+        <div className="flex-1 min-w-[300px] flex flex-col overflow-hidden">
+          <div className="flex-1 overflow-y-auto pr-0.5">
             <NegotiationStateCard
               state={negotiationState}
               isDualModelActive={state.isNegotiating}
+              liveTranscript={liveTranscript}
+              isAddressingAI={isAddressingAI}
             />
           </div>
         </div>
-
       </div>
 
-      {/* Bottom Control Bar */}
-      <div className="shrink-0 bg-white">
-        <ControlBar
-          isAudioActive={state.isAudioActive}
-          isVisionActive={state.isVisionActive}
-          isNegotiating={state.isNegotiating}
-          onToggleAudio={onToggleAudio}
-          onToggleVision={onToggleVision}
-          onStartNegotiation={onStartNegotiation}
-          onEndNegotiation={onEndNegotiation}
-        />
-      </div>
-
-      {/* Ask AI Buttons - Advice and Command options */}
-      {state.isNegotiating && (
-        <div className="fixed bottom-24 right-8 z-50">
-          <AskAIButton
-            onStartCopilot={onStartCopilot}
-            onGetAdvice={onGetAdvice}
-            onGetCommand={onGetCommand}
-            isLoading={isAILoading}
-            isDisabled={!state.isNegotiating}
-            copilotActive={state.copilotActive}
-            responseMode={responseMode}
+      {/* Bottom Bar */}
+      <div className="shrink-0 relative z-10"
+        style={{
+          background: 'rgba(11,11,20,0.6)',
+          backdropFilter: 'blur(40px) saturate(200%)',
+          borderTop: '1px solid rgba(255,255,255,0.1)',
+          boxShadow: '0 -1px 0 rgba(255,255,255,0.04), 0 -8px 32px rgba(0,0,0,0.3)',
+        }}>
+        <div className="relative flex items-center justify-center p-4">
+          <ControlBar
+            isAudioActive={state.isAudioActive}
+            isVisionActive={state.isVisionActive}
+            isNegotiating={state.isNegotiating}
+            onToggleAudio={onToggleAudio}
+            onToggleVision={onToggleVision}
+            onStartNegotiation={onStartNegotiation}
+            onEndNegotiation={onEndNegotiation}
           />
+          <div className="absolute right-6 top-1/2 -translate-y-1/2">
+            <AskAIButton
+              onStartCopilot={onStartCopilot}
+              onGetAdvice={onGetAdvice}
+              onGetCommand={onGetCommand}
+              isLoading={isAILoading}
+              isDisabled={!state.isNegotiating}
+              copilotActive={state.copilotActive}
+              responseMode={responseMode}
+            />
+          </div>
         </div>
-      )}
+      </div>
 
-      {/* AI Live Transcription - isolated display, not part of transcript */}
+      {/* AI Live Transcription */}
       {aiLiveTranscription && state.aiState === 'speaking' && (
-        <div className="fixed bottom-36 left-1/2 transform -translate-x-1/2 z-40 max-w-lg w-full px-4 pointer-events-none">
-          <div className="bg-neutral-900/85 text-white px-5 py-3 rounded-xl shadow-xl text-sm leading-relaxed">
-            <span className="text-blue-400 font-medium text-xs uppercase tracking-wide block mb-1">AI</span>
-            {aiLiveTranscription}
+        <div className="fixed bottom-28 left-1/2 -translate-x-1/2 z-40 max-w-lg w-full px-4 pointer-events-none">
+          <div className="px-5 py-3 rounded-2xl text-sm leading-relaxed"
+            style={{
+              background: 'rgba(11,11,20,0.7)',
+              backdropFilter: 'blur(40px) saturate(200%)',
+              border: '1px solid rgba(245,197,24,0.25)',
+              boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
+            }}>
+            <span className="font-bold text-[10px] uppercase tracking-widest block mb-1" style={{ color: '#f5c518' }}>AI</span>
+            <span style={{ color: 'rgba(255,255,255,0.9)' }}>{aiLiveTranscription}</span>
           </div>
         </div>
       )}
 
-      {/* Addressing AI Indicator - shows when user is holding to speak to AI */}
+      {/* Addressing AI */}
       {isAddressingAI && (
-        <div className="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-50 pointer-events-none">
-          <div className="bg-blue-600/90 text-white px-8 py-4 rounded-2xl shadow-2xl flex items-center gap-3 animate-pulse">
-            <div className="w-3 h-3 bg-white rounded-full animate-ping"></div>
-            <span className="font-semibold text-lg">Listening to you...</span>
+        <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 pointer-events-none">
+          <div className="px-8 py-4 rounded-2xl flex items-center gap-3 animate-pulse"
+            style={{
+              background: 'rgba(245,197,24,0.08)',
+              backdropFilter: 'blur(40px)',
+              border: '1px solid rgba(245,197,24,0.4)',
+              boxShadow: '0 0 48px rgba(245,197,24,0.2)',
+            }}>
+            <div className="w-3 h-3 rounded-full animate-ping" style={{ background: '#f5c518' }} />
+            <span className="font-bold text-lg" style={{ color: '#ffd700', textShadow: '0 0 16px rgba(245,197,24,0.7)' }}>
+              Listening to you...
+            </span>
           </div>
         </div>
       )}
 
-      {/* AI Degraded Notice overlay if applicable */}
+      {/* Degraded */}
       {state.aiDegraded && (
-        <div className="absolute top-4 left-1/2 transform -translate-x-1/2 bg-yellow-100 text-yellow-800 px-6 py-2 rounded-full shadow-md border border-yellow-300 flex items-center z-50 animate-bounce">
-          <span className="font-semibold text-sm">Connection unstable. Operating in text-only fallback mode.</span>
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 animate-bounce">
+          <div className="px-6 py-2 rounded-full flex items-center"
+            style={{ background: 'rgba(245,197,24,0.08)', border: '1px solid rgba(245,197,24,0.3)', backdropFilter: 'blur(20px)' }}>
+            <span className="font-semibold text-sm" style={{ color: '#ffd700' }}>
+              Connection unstable. Operating in text-only fallback mode.
+            </span>
+          </div>
         </div>
       )}
     </div>

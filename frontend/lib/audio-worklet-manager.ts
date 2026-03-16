@@ -1,5 +1,3 @@
-import { VoiceFingerprint, identifySpeakerWithConfidence } from './voice-fingerprint';
-
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export type Speaker = 'USER' | 'COUNTERPARTY';
@@ -12,29 +10,16 @@ export interface AudioManagerConfig {
   silenceThreshold?: number;
   /** Milliseconds of silence before firing onSilence. Default: 500 */
   silenceDebounceMs?: number;
-  /** Minimum confidence to accept a speaker ID result. Default: 0.85 */
-  minSpeakerConfidence?: number;
-  /** Number of past frames to use for majority-vote smoothing. Default: 3 */
-  smoothingWindow?: number;
-  /** Minimum Float32 samples accumulated before running speaker ID. Default: 8000 */
-  speakerIdChunkSize?: number;
   /** Sample rate for capture. Default: 16000 */
   captureSampleRate?: number;
   /** Sample rate for playback (Gemini output). Default: 24000 */
   playbackSampleRate?: number;
 }
 
-export interface SpeakerIdentificationResult {
-  speaker: Speaker;
-  confidence: number;
-  audioChunk: Float32Array;
-}
-
 export interface CaptureCallbacks {
   onChunk: (buffer: ArrayBuffer) => void;
   onSilence?: () => void;
   onSpeech?: () => void;
-  onSpeakerIdentified?: (result: SpeakerIdentificationResult) => void;
   onStateChange?: (state: CaptureState) => void;
   onError?: (error: AudioManagerError) => void;
 }
@@ -62,32 +47,6 @@ export enum AudioErrorCode {
   CONTEXT_SUSPENDED = 'CONTEXT_SUSPENDED',
 }
 
-// ─── Speaker ID: sliding window majority vote ─────────────────────────────────
-
-class SpeakerSmoother {
-  private history: Speaker[] = [];
-
-  constructor(
-    private readonly windowSize: number,
-    private readonly minConfidence: number
-  ) { }
-
-  /** Feed a new raw result; returns the smoothed speaker. */
-  update(speaker: Speaker, confidence: number): Speaker | null {
-    if (confidence < this.minConfidence) return null; // reject low-confidence
-
-    this.history.push(speaker);
-    if (this.history.length > this.windowSize) this.history.shift();
-
-    const userVotes = this.history.filter(s => s === 'USER').length;
-    return userVotes > this.windowSize / 2 ? 'USER' : 'COUNTERPARTY';
-  }
-
-  reset(): void {
-    this.history = [];
-  }
-}
-
 // ─── AudioWorkletManager ──────────────────────────────────────────────────────
 
 /**
@@ -96,26 +55,21 @@ class SpeakerSmoother {
  * Manages microphone capture and audio playback for the Gemini Live API.
  * - Capture outputs Int16 PCM @ 16kHz (raw ArrayBuffers, no base64).
  * - Playback expects Int16 PCM @ 24kHz ArrayBuffers from Gemini.
- * - Optional real-time speaker identification via VoiceFingerprint.
  *
  * Lifecycle:
  *   1. new AudioWorkletManager(config?)
- *   2. setVoiceprint(vp)          — optional, enables speaker ID
- *   3. await startCapture(cbs)    — starts mic
- *   4. await initPlayback()       — prepares playback pipeline
- *   5. playChunk(buffer)          — feed Gemini audio
- *   6. stopCapture()              — mic off, playback stays alive
- *   7. cleanup()                  — full teardown
+ *   2. await startCapture(cbs)    — starts mic
+ *   3. await initPlayback()       — prepares playback pipeline
+ *   4. playChunk(buffer)          — feed Gemini audio
+ *   5. stopCapture()              — mic off, playback stays alive
+ *   6. cleanup()                  — full teardown
  */
 export class AudioWorkletManager {
   // ── Config ──────────────────────────────────────────────────────────────────
 
   private readonly cfg: Required<AudioManagerConfig> = {
     silenceThreshold: 50,
-    silenceDebounceMs: 500,
-    minSpeakerConfidence: 0.85,
-    smoothingWindow: 3,
-    speakerIdChunkSize: 8000,
+    silenceDebounceMs: 1500,  // keep speaking window open longer
     captureSampleRate: 16000,
     playbackSampleRate: 24000,
   };
@@ -124,6 +78,7 @@ export class AudioWorkletManager {
 
   private captureState: CaptureState = 'idle';
   private playbackState: PlaybackState = 'idle';
+  private _bypassVAD = false; // when true, send all audio regardless of silence
 
   // ── Capture resources ───────────────────────────────────────────────────────
 
@@ -138,13 +93,6 @@ export class AudioWorkletManager {
   private playbackCtx: AudioContext | null = null;
   private playbackNode: AudioWorkletNode | null = null;
 
-  // ── Speaker identification ──────────────────────────────────────────────────
-
-  private voiceprint: VoiceFingerprint | null = null;
-  private speakerBuffer: Float32Array[] = [];
-  private smoother: SpeakerSmoother;
-  private lastKnownSpeaker: Speaker | null = null;
-
   // ── Callbacks ───────────────────────────────────────────────────────────────
 
   private callbacks: CaptureCallbacks | null = null;
@@ -153,34 +101,6 @@ export class AudioWorkletManager {
 
   constructor(config: AudioManagerConfig = {}) {
     Object.assign(this.cfg, config);
-    this.smoother = new SpeakerSmoother(
-      this.cfg.smoothingWindow,
-      this.cfg.minSpeakerConfidence
-    );
-  }
-
-  // ── Public: voiceprint ──────────────────────────────────────────────────────
-
-  /**
-   * Load a pre-enrolled VoiceFingerprint to enable speaker identification.
-   * Call before or during an active capture session.
-   */
-  setVoiceprint(vp: VoiceFingerprint): void {
-    this.voiceprint = vp;
-    this.smoother.reset();
-    this.lastKnownSpeaker = null;
-    console.debug('[AudioManager] Voiceprint loaded', {
-      coefficients: vp.numCoefficients,
-      enrollmentDuration: vp.enrollmentDuration,
-      sampleRate: vp.sampleRate,
-    });
-  }
-
-  clearVoiceprint(): void {
-    this.voiceprint = null;
-    this.speakerBuffer = [];
-    this.smoother.reset();
-    this.lastKnownSpeaker = null;
   }
 
   // ── Public: capture ─────────────────────────────────────────────────────────
@@ -233,6 +153,53 @@ export class AudioWorkletManager {
     this.teardownCapture();
     this.setCaptureState('idle');
   }
+
+  /**
+   * Records audio for a specific duration and returns the combined chunk.
+   * This is a self-contained, one-shot recording method.
+   */
+  async startRecording(durationMs: number): Promise<ArrayBuffer | null> {
+    if (this.captureState !== 'idle') {
+      console.error("Cannot start one-shot recording while another capture is active.");
+      return null;
+    }
+
+    return new Promise(async (resolve, reject) => {
+      const recordedChunks: ArrayBuffer[] = [];
+      
+      const tempCallbacks: CaptureCallbacks = {
+        onChunk: (chunk) => {
+          recordedChunks.push(chunk);
+        },
+        onError: (error) => {
+          this.stopCapture();
+          reject(error);
+        }
+      };
+
+      try {
+        await this.startCapture(tempCallbacks);
+
+        setTimeout(() => {
+          this.stopCapture();
+          
+          const totalLength = recordedChunks.reduce((acc, chunk) => acc + chunk.byteLength, 0);
+          const combined = new Uint8Array(totalLength);
+          let offset = 0;
+          for (const chunk of recordedChunks) {
+            combined.set(new Uint8Array(chunk), offset);
+            offset += chunk.byteLength;
+          }
+          
+          resolve(combined.buffer);
+        }, durationMs);
+
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+
 
   // ── Public: playback ────────────────────────────────────────────────────────
 
@@ -302,13 +269,21 @@ export class AudioWorkletManager {
     this.stopCapture();
     await this.teardownPlayback();
     this.callbacks = null;
-    this.clearVoiceprint();
   }
 
   // ── Public: state getters ───────────────────────────────────────────────────
 
   get isCapturing(): boolean {
     return this.captureState === 'capturing';
+  }
+
+  /** Bypass VAD — send all audio chunks regardless of silence detection */
+  setBypassVAD(bypass: boolean): void {
+    this._bypassVAD = bypass;
+    if (bypass) {
+      // Immediately mark as speaking so chunks flow right away
+      this.isSpeaking = true;
+    }
   }
 
   get isPlaybackReady(): boolean {
@@ -346,15 +321,11 @@ export class AudioWorkletManager {
     const speaking = this.isAboveSilenceThreshold(int16);
     this.handleSpeechActivity(speaking);
 
-    // 1. Forward raw PCM to caller ONLY if we are currently in a speech window
-    // (This prevents sending continuous background noise which causes Gemini to buffer >20s and crash with 1007)
-    if (this.isSpeaking) {
+    // Forward raw PCM to caller if we are in a speech window OR VAD is bypassed.
+    // _bypassVAD is set when user is press-and-holding to talk to AI — all audio
+    // must flow immediately without waiting for the silence debounce.
+    if (this._bypassVAD || this.isSpeaking) {
       this.callbacks?.onChunk(buffer);
-    }
-
-    // 3. Speaker identification (if voiceprint loaded)
-    if (this.voiceprint && this.callbacks?.onSpeakerIdentified && speaking) {
-      this.processSpeakerIdentification(int16);
     }
   };
 
@@ -385,38 +356,6 @@ export class AudioWorkletManager {
       sum += samples[i] * samples[i];
     }
     return Math.sqrt(sum / samples.length) > this.cfg.silenceThreshold;
-  }
-
-  // ── Private: speaker identification ─────────────────────────────────────────
-
-  private processSpeakerIdentification(int16: Int16Array): void {
-    // Convert Int16 → Float32 (normalized)
-    const float32 = int16ToFloat32(int16);
-    this.speakerBuffer.push(float32);
-
-    const totalSamples = this.speakerBuffer.reduce((n, c) => n + c.length, 0);
-    if (totalSamples < this.cfg.speakerIdChunkSize) return;
-
-    // Concatenate accumulated frames
-    const combined = concatFloat32(this.speakerBuffer, totalSamples);
-
-    // Run identification
-    const raw = identifySpeakerWithConfidence(combined, this.voiceprint!);
-
-    // Majority-vote smoothing
-    const smoothed = this.smoother.update(raw.speaker, raw.confidence);
-    const resolved: Speaker = smoothed ?? this.lastKnownSpeaker ?? raw.speaker;
-
-    if (smoothed !== null) this.lastKnownSpeaker = smoothed;
-
-    this.callbacks?.onSpeakerIdentified?.({
-      speaker: resolved,
-      confidence: raw.confidence,
-      audioChunk: combined,
-    });
-
-    // Retain the last frame for temporal overlap (improves continuity)
-    this.speakerBuffer = [this.speakerBuffer[this.speakerBuffer.length - 1]];
   }
 
   // ── Private: AudioContext helpers ────────────────────────────────────────────
@@ -477,7 +416,6 @@ export class AudioWorkletManager {
       this.silenceTimer = null;
     }
     this.isSpeaking = false;
-    this.speakerBuffer = [];
 
     this.captureNode?.disconnect();
     this.captureNode = null;
@@ -517,16 +455,6 @@ function int16ToFloat32(int16: Int16Array): Float32Array {
   const out = new Float32Array(int16.length);
   for (let i = 0; i < int16.length; i++) {
     out[i] = int16[i] / 32768.0;
-  }
-  return out;
-}
-
-function concatFloat32(chunks: Float32Array[], totalLength: number): Float32Array {
-  const out = new Float32Array(totalLength);
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.length;
   }
   return out;
 }

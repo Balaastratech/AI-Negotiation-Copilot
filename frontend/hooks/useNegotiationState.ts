@@ -6,10 +6,16 @@ import { useState, useCallback } from 'react';
  */
 export interface NegotiationState {
   item: string;
+  negotiation_type: string | null;
   seller_price: number | null;
   user_offer: number | null;
   target_price: number;
   max_price: number;
+  counterparty_sentiment: string | null;
+  counterparty_goal: string | null;
+  key_moments: string[];
+  leverage_points: string[];
+  transcript_snippet: string | null;
   market_data: any;
   transcript: TranscriptEntry[];
   isResearching: boolean;
@@ -35,10 +41,16 @@ export interface ValidationError {
 
 const INITIAL_STATE: NegotiationState = {
   item: '',
+  negotiation_type: null,
   seller_price: null,
   user_offer: null,
   target_price: 0,
   max_price: 0,
+  counterparty_sentiment: null,
+  counterparty_goal: null,
+  key_moments: [],
+  leverage_points: [],
+  transcript_snippet: null,
   market_data: null,
   transcript: [],
   isResearching: false,
@@ -171,16 +183,52 @@ export function useNegotiationState() {
           newState.target_price = updates.target_price;
         }
       }
-      
+      // backend sends user_target_price
+      const targetPrice = (updates as any).user_target_price ?? updates.target_price;
+      if (targetPrice != null && targetPrice !== prev.target_price) {
+        newState.target_price = targetPrice;
+      }
+
       if (updates.max_price !== undefined && updates.max_price !== null) {
         if (updates.max_price !== prev.max_price) {
           newState.max_price = updates.max_price;
         }
       }
+      // backend sends user_max_price
+      const maxPrice = (updates as any).user_max_price ?? updates.max_price;
+      if (maxPrice != null && maxPrice !== prev.max_price) {
+        newState.max_price = maxPrice;
+      }
       
       // Other fields can be merged normally
       if (updates.market_data !== undefined) {
         newState.market_data = updates.market_data;
+      }
+
+      if (updates.negotiation_type !== undefined && updates.negotiation_type !== null) {
+        newState.negotiation_type = updates.negotiation_type;
+      }
+
+      // counterparty_sentiment — backend sends as either 'sentiment' or 'counterparty_sentiment'
+      const sentiment = (updates as any).sentiment || updates.counterparty_sentiment;
+      if (sentiment) newState.counterparty_sentiment = sentiment;
+
+      if (updates.counterparty_goal !== undefined && updates.counterparty_goal !== null) {
+        newState.counterparty_goal = updates.counterparty_goal;
+      }
+
+      if (updates.key_moments !== undefined && updates.key_moments.length > 0) {
+        const merged = Array.from(new Set([...newState.key_moments, ...updates.key_moments]));
+        newState.key_moments = merged.slice(-5);
+      }
+
+      if (updates.leverage_points !== undefined && updates.leverage_points.length > 0) {
+        const merged = Array.from(new Set([...newState.leverage_points, ...updates.leverage_points]));
+        newState.leverage_points = merged.slice(-5);
+      }
+
+      if (updates.transcript_snippet !== undefined && updates.transcript_snippet !== null) {
+        newState.transcript_snippet = updates.transcript_snippet;
       }
       
       // Validate the new state

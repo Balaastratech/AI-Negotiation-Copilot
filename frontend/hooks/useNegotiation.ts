@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useReducer } from 'react';
 import { NegotiationWebSocket } from '../lib/websocket';
 import { AudioWorkletManager } from '../lib/audio-worklet-manager';
-import { VoiceFingerprint } from '../lib/voice-fingerprint';
 import {
     NegotiationState,
     INITIAL_NEGOTIATION_STATE,
@@ -90,11 +89,7 @@ export function useNegotiation() {
 
     const wsRef = useRef<NegotiationWebSocket | null>(null);
     const audioManagerRef = useRef<AudioWorkletManager | null>(null);
-    const voiceprintRef = useRef<VoiceFingerprint | null>(null);
-    const speakerBufferRef = useRef<Map<'USER' | 'COUNTERPARTY', Float32Array[]>>(new Map());
-    const lastSpeakerRef = useRef<'USER' | 'COUNTERPARTY' | null>(null);
     const speakerDebounceTimerRef = useRef<NodeJS.Timeout | null>(null);
-    const pendingSpeakerRef = useRef<'USER' | 'COUNTERPARTY' | null>(null);
 
     const hasInitialized = useRef(false);
 
@@ -261,16 +256,6 @@ export function useNegotiation() {
         wsRef.current?.sendControl('PRIVACY_CONSENT_GRANTED', { version, mode });
     }, []);
 
-    /**
-     * Set the user's voice fingerprint for speaker identification.
-     * Should be called after enrollment and before starting negotiation.
-     */
-    const setVoiceprint = useCallback((voiceprint: VoiceFingerprint) => {
-        voiceprintRef.current = voiceprint;
-        audioManagerRef.current?.setVoiceprint(voiceprint);
-        console.log('[useNegotiation] Voice fingerprint set');
-    }, []);
-
     const startNegotiation = useCallback(async (contextStr: string, userContext?: Record<string, unknown>) => {
         await audioManagerRef.current?.initPlayback();
 
@@ -283,9 +268,6 @@ export function useNegotiation() {
             },
             onSpeech: () => {
                 // local VAD — do not change AI state indicator
-            },
-            onSpeakerIdentified: (_result) => {
-                // TEMPORARILY DISABLED
             }
         });
 
@@ -310,10 +292,24 @@ export function useNegotiation() {
     // Manual speaker selection (bypasses voice fingerprinting)
     const setManualSpeaker = useCallback((speaker: 'user' | 'counterparty') => {
         const speakerUpper = speaker.toUpperCase() as 'USER' | 'COUNTERPARTY';
-        console.log(`[Manual Speaker] User selected: ${speakerUpper}`);
-
-        // Update last speaker
-        lastSpeakerRef.current = speakerUpper;
+        
+        // ═══════════════════════════════════════════════════════════
+        // 🖱️ MANUAL BUTTON CLICK LOG
+        // ═══════════════════════════════════════════════════════════
+        console.log('');
+        console.log('╔═══════════════════════════════════════════════════════╗');
+        console.log('║         🖱️  MANUAL SPEAKER BUTTON CLICKED            ║');
+        console.log('╚═══════════════════════════════════════════════════════╝');
+        console.log(`📊 Speaker Selected: ${speakerUpper}`);
+        console.log(`⏰ Timestamp: ${new Date().toLocaleTimeString()}`);
+        console.log('');
+        console.log('📤 Sending to Backend:');
+        console.log('   Message Type: SPEAKER_IDENTIFIED');
+        console.log(`   Payload: { speaker: "${speaker.toLowerCase()}", timestamp: ${Date.now()} }`);
+        console.log('');
+        console.log('✅ Backend will label transcript with this speaker.');
+        console.log('═══════════════════════════════════════════════════════');
+        console.log('');
 
         // Send to backend immediately
         wsRef.current?.sendControl('SPEAKER_IDENTIFIED', {
@@ -329,6 +325,9 @@ export function useNegotiation() {
 
     const setUserAddressingAI = useCallback((active: boolean) => {
         console.log(`[Copilot] User addressing AI: ${active}`);
+        // Bypass VAD when user is holding to speak to AI — ensures all audio
+        // flows immediately without silence-detection dropping the first chunks.
+        audioManagerRef.current?.setBypassVAD(active);
         wsRef.current?.sendControl('USER_ADDRESSING_AI', { active });
     }, []);
 
@@ -336,7 +335,6 @@ export function useNegotiation() {
         state,
         connect,
         grantConsent,
-        setVoiceprint,
         startNegotiation,
         endNegotiation,
         sendFrame,
@@ -344,6 +342,7 @@ export function useNegotiation() {
         startCopilot,
         setUserAddressingAI,
         websocket: wsRef.current,
-        aiLiveTranscription: state.aiLiveTranscription
+        aiLiveTranscription: state.aiLiveTranscription,
+        audioManager: audioManagerRef.current,
     };
 }

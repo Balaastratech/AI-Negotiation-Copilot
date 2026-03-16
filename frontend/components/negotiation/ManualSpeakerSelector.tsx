@@ -1,6 +1,5 @@
 "use client";
-
-import { useState } from 'react';
+import React from 'react';
 
 interface ManualSpeakerSelectorProps {
   onSpeakerSelected: (speaker: 'user' | 'counterparty') => void;
@@ -8,39 +7,25 @@ interface ManualSpeakerSelectorProps {
 }
 
 export function ManualSpeakerSelector({ onSpeakerSelected, currentSpeaker }: ManualSpeakerSelectorProps) {
+  const baseStyle = "px-4 py-2 rounded-md text-sm font-semibold transition-colors";
+  const activeStyle = "bg-blue-600 text-white";
+  const inactiveStyle = "bg-gray-200 text-gray-700 hover:bg-gray-300";
+
   return (
-    <div className="flex items-center gap-3 p-4 bg-white rounded-lg shadow-sm border border-neutral-200">
-      <span className="text-sm font-medium text-neutral-700">Who is speaking?</span>
-      
-      <div className="flex gap-2">
-        <button
-          onClick={() => onSpeakerSelected('user')}
-          className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${
-            currentSpeaker === 'user'
-              ? 'bg-blue-600 text-white shadow-md'
-              : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'
-          }`}
-        >
-          👤 USER
-        </button>
-        
-        <button
-          onClick={() => onSpeakerSelected('counterparty')}
-          className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${
-            currentSpeaker === 'counterparty'
-              ? 'bg-green-600 text-white shadow-md'
-              : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'
-          }`}
-        >
-          🤝 COUNTERPARTY
-        </button>
-      </div>
-      
-      {currentSpeaker && (
-        <span className="text-xs text-neutral-500 ml-2">
-          (Active: {currentSpeaker.toUpperCase()})
-        </span>
-      )}
+    <div className="flex items-center space-x-4 p-4 bg-gray-100 rounded-lg">
+      <span className="font-medium text-gray-800">Who is speaking now?</span>
+      <button
+        onClick={() => onSpeakerSelected('user')}
+        className={`${baseStyle} ${currentSpeaker === 'user' ? activeStyle : inactiveStyle}`}
+      >
+        Me (User)
+      </button>
+      <button
+        onClick={() => onSpeakerSelected('counterparty')}
+        className={`${baseStyle} ${currentSpeaker === 'counterparty' ? activeStyle : inactiveStyle}`}
+      >
+        Counterparty
+      </button>
     </div>
   );
 }

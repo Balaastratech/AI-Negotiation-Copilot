@@ -3,26 +3,23 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { useNegotiation } from '@/hooks/useNegotiation';
 import { useNegotiationState } from '@/hooks/useNegotiationState';
-import { useAudioWithSpeakerID } from '@/hooks/useAudioWithSpeakerID';
 import { useAskAI } from '@/hooks/useAskAI';
 import { NegotiationDashboard } from '@/components/negotiation/NegotiationDashboard';
-import VoiceEnrollmentScreen from '@/components/enrollment/VoiceEnrollmentScreen';
-import { VoiceFingerprint } from '@/lib/voice-fingerprint';
 
 // ─── Main Page ─────────────────────────────────────────────────────────────────
 export default function Home() {
-  const {
-    state,
-    connect,
-    grantConsent,
-    setVoiceprint,
-    startNegotiation,
-    endNegotiation,
-    setManualSpeaker,
-    startCopilot,
-    setUserAddressingAI,
-    websocket
-  } = useNegotiation();
+    const {
+        state,
+        connect,
+        grantConsent,
+        startNegotiation,
+        endNegotiation,
+        setManualSpeaker,
+        startCopilot,
+        setUserAddressingAI,
+        websocket,
+        audioManager,
+    } = useNegotiation();
 
   const {
     state: negotiationState,
@@ -40,11 +37,8 @@ export default function Home() {
     setResearchState
   );
 
-  const [voiceFingerprint, setVoiceFingerprint] = useState<VoiceFingerprint | null>(null);
-  const [enrollmentComplete, setEnrollmentComplete] = useState(true);
   const [currentSpeaker, setCurrentSpeaker] = useState<'user' | 'counterparty' | null>(null);
 
-  const { processAudioChunk, isReady: isSpeakerIDReady } = useAudioWithSpeakerID(voiceFingerprint);
 
   const [isSessionActive, setIsSessionActive] = useState(false);
   const [isAudioActive, setIsAudioActive] = useState(false);
@@ -156,26 +150,12 @@ export default function Home() {
 
   const dashboardState = { ...state, isNegotiating: isSessionActive, isAudioActive, isVisionActive };
 
-  if (!enrollmentComplete) {
-    return (
-      <VoiceEnrollmentScreen
-        onEnrollmentComplete={(fp: VoiceFingerprint) => {
-          setVoiceFingerprint(fp);
-          setVoiceprint(fp);
-          setEnrollmentComplete(true);
-        }}
-        onError={() => setEnrollmentComplete(true)}
-      />
-    );
-  }
-
   return (
     <main className="h-screen w-screen overflow-hidden text-neutral-900 bg-neutral-100 font-sans">
       <NegotiationDashboard
         state={dashboardState}
         negotiationState={negotiationState}
         validationErrors={validationErrors}
-        voiceFingerprint={voiceFingerprint}
         onConsent={handleConsent}
         onToggleAudio={handleToggleAudio}
         onToggleVision={handleToggleVision}
@@ -190,6 +170,7 @@ export default function Home() {
         currentSpeaker={currentSpeaker}
         responseMode={state.responseMode}
         aiLiveTranscription={state.aiLiveTranscription}
+        liveTranscript={state.transcript.slice(-6)}
       />
     </main>
   );

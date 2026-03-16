@@ -8,70 +8,27 @@ interface AIStateIndicatorProps {
 export function AIStateIndicator({ state }: AIStateIndicatorProps) {
   if (state === 'idle') return null;
 
-  const stateConfig = {
-    connecting: {
-      icon: Loader2,
-      text: 'Connecting...',
-      bgColor: 'bg-orange-500',
-      textColor: 'text-orange-50',
-      pulseColor: 'bg-orange-400',
-      description: 'Connecting to AI advisor',
-      spin: true,
-    },
-    connected: {
-      icon: CheckCircle2,
-      text: 'Connected',
-      bgColor: 'bg-emerald-500',
-      textColor: 'text-emerald-50',
-      pulseColor: 'bg-emerald-400',
-      description: 'AI advisor ready',
-      spin: false,
-    },
-    listening: {
-      icon: Mic,
-      text: 'Listening...',
-      bgColor: 'bg-blue-500',
-      textColor: 'text-blue-50',
-      pulseColor: 'bg-blue-400',
-      description: 'AI is listening',
-      spin: false,
-    },
-    thinking: {
-      icon: Brain,
-      text: 'Processing...',
-      bgColor: 'bg-purple-500',
-      textColor: 'text-purple-50',
-      pulseColor: 'bg-purple-400',
-      description: 'AI is analyzing',
-      spin: false,
-    },
-    speaking: {
-      icon: Volume2,
-      text: 'Speaking...',
-      bgColor: 'bg-green-500',
-      textColor: 'text-green-50',
-      pulseColor: 'bg-green-400',
-      description: 'AI is responding',
-      spin: false,
-    },
-  };
+  const cfg = {
+    connecting: { icon: Loader2,      text: 'Connecting to AI advisor', color: '#fb923c', spin: true  },
+    connected:  { icon: CheckCircle2, text: 'AI advisor ready',          color: '#34d399', spin: false },
+    listening:  { icon: Mic,          text: 'AI listening',              color: '#60a5fa', spin: false },
+    thinking:   { icon: Brain,        text: 'AI processing',             color: '#c084fc', spin: false },
+    speaking:   { icon: Volume2,      text: 'AI speaking',               color: '#34d399', spin: false },
+  }[state];
 
-  const config = stateConfig[state];
-  const Icon = config.icon;
+  const Icon = cfg.icon;
 
   return (
-    <div className="fixed top-6 left-1/2 transform -translate-x-1/2 z-50">
-      <div className={`${config.bgColor} ${config.textColor} px-6 py-3 rounded-full shadow-lg flex items-center gap-3 border-2 border-white/20`}>
-        <div className="relative">
-          {!config.spin && (
-            <div className={`absolute inset-0 ${config.pulseColor} rounded-full animate-ping opacity-75`}></div>
-          )}
-          <Icon className={`w-5 h-5 relative z-10 ${config.spin ? 'animate-spin' : ''}`} />
-        </div>
-        <div className="flex flex-col">
-          <span className="font-semibold text-sm">{config.text}</span>
-          <span className="text-xs opacity-90">{config.description}</span>
-        </div>
+    <div className="fixed top-3 left-1/2 -translate-x-1/2 z-50 pointer-events-none">
+      <div className="flex items-center gap-1.5 px-3 py-1 rounded-full"
+        style={{
+          background: 'rgba(8,8,16,0.55)',
+          backdropFilter: 'blur(24px) saturate(180%)',
+          border: `1px solid ${cfg.color}45`,
+          boxShadow: `0 0 14px ${cfg.color}20`,
+        }}>
+        <Icon className={`w-3 h-3 ${cfg.spin ? 'animate-spin' : ''}`} style={{ color: cfg.color }} />
+        <span className="text-[11px] font-semibold" style={{ color: cfg.color }}>{cfg.text}</span>
       </div>
     </div>
   );
