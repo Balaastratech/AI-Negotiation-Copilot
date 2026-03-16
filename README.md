@@ -6,8 +6,22 @@ Built for the **Gemini Live Agent Challenge**.
 
 ---
 
+## 🚀 Live Demo (No Setup Required)
+
+| Service | URL |
+|---|---|
+| **Frontend (Live App)** | https://negotiation-frontend-219079068693.us-central1.run.app |
+| **Backend Health Check** | https://negotiation-backend-219079068693.us-central1.run.app/health |
+
+> Both services are deployed on **Google Cloud Run** in `us-central1`.
+> No login required. Just open the frontend URL in **Chrome** and allow microphone access.
+
+---
+
 ## Table of Contents
 
+- [Live Demo](#-live-demo-no-setup-required)
+- [Reproducible Testing](#-reproducible-testing)
 - [Overview](#overview)
 - [Features](#features)
 - [Tech Stack](#tech-stack)
@@ -18,8 +32,149 @@ Built for the **Gemini Live Agent Challenge**.
 - [How It Works](#how-it-works)
 - [WebSocket API](#websocket-api)
 - [Deployment](#deployment)
-- [Testing](#testing)
+- [Automated Tests](#automated-tests)
 - [Troubleshooting](#troubleshooting)
+
+---
+
+## ✅ Reproducible Testing
+
+### Option A — Test the Live Deployed App (Fastest, No Setup)
+
+**Requirements:** A modern browser (Chrome recommended) with a working microphone.
+
+**Step 1 — Verify the backend is running:**
+```
+GET https://negotiation-backend-219079068693.us-central1.run.app/health
+```
+Expected response: `{"status": "healthy"}`
+
+**Step 2 — Open the frontend:**
+```
+https://negotiation-frontend-219079068693.us-central1.run.app
+```
+
+**Step 3 — Run a full end-to-end test:**
+
+1. **Allow microphone** when the browser prompts
+2. Click **"I Understand, Continue"** on the privacy consent screen
+3. Optionally enter a negotiation context (e.g. `"Buying a used laptop, seller asking $800"`)
+4. Click **"Start Negotiation"**
+5. Wait for `AI is connected` status indicator (green)
+6. **Speak out loud** — say something like: *"I think $800 is too high, what do you think?"*
+7. Watch the **Transcript panel** update in real time with your speech
+8. Watch the **Strategy panel** update with AI coaching advice
+9. Hold the **"Ask AI"** button and ask a direct question: *"What should I offer?"*
+10. Listen for the **AI voice response** through your speakers
+11. Click **"End Negotiation"** — see the outcome summary with effectiveness score
+
+**Expected results at each step:**
+| Step | What you should see |
+|---|---|
+| After Step 4 | Status changes to `AI Connecting...` then `AI Listening` |
+| After Step 6 | Transcript panel shows your speech with speaker label |
+| After Step 7 | Strategy panel shows negotiation advice (price analysis, recommended tactic) |
+| After Step 9 | AI state changes to `AI Thinking` → `AI Speaking`, voice plays back |
+| After Step 11 | Outcome summary card appears with deal score |
+
+---
+
+### Option B — Run Locally
+
+**Requirements:** Python 3.11+, Node.js 18+, a Gemini API key from https://aistudio.google.com/app/apikey
+
+**Step 1 — Clone and set up backend:**
+```bash
+git clone https://github.com/your-username/ai-negotiation-copilot.git
+cd ai-negotiation-copilot/backend
+
+python -m venv venv
+venv\Scripts\activate        # Windows
+# source venv/bin/activate   # macOS/Linux
+
+pip install -r requirements.txt
+cp .env.example .env
+```
+
+Edit `backend/.env`:
+```env
+GEMINI_API_KEY=your_gemini_api_key_here
+CORS_ORIGINS=http://localhost:3000
+```
+
+**Step 2 — Start the backend:**
+```bash
+uvicorn app.main:app --reload --port 8000
+```
+Verify: `curl http://localhost:8000/health` → `{"status":"healthy"}`
+
+**Step 3 — Set up and start the frontend:**
+```bash
+cd ../frontend
+npm install
+npm run dev
+```
+
+**Step 4 — Open the app:**
+```
+http://localhost:3000
+```
+
+Follow the same test steps as Option A above.
+
+---
+
+### Option C — Run Automated Tests
+
+**Backend tests (pytest):**
+```bash
+cd backend
+venv\Scripts\activate
+pip install -r requirements-dev.txt
+pytest tests/ -v
+```
+
+**Frontend tests (Vitest):**
+```bash
+cd frontend
+npm test                   # Run all tests once
+npm run test:coverage      # With coverage report
+npm run test:ui            # Interactive test UI in browser
+```
+
+---
+
+### Option D — Redeploy to Google Cloud (Full Reproducibility)
+
+**Requirements:** Google Cloud SDK, a GCP project with billing enabled.
+
+```bash
+# 1. Authenticate
+gcloud auth login
+gcloud config set project YOUR_PROJECT_ID
+
+# 2. Enable APIs
+gcloud services enable run.googleapis.com artifactregistry.googleapis.com aiplatform.googleapis.com cloudbuild.googleapis.com secretmanager.googleapis.com
+
+# 3. Create image registry
+gcloud artifacts repositories create negotiation-app --repository-format=docker --location=us-central1
+
+# 4. Store API key
+echo -n "YOUR_GEMINI_API_KEY" | gcloud secrets create GEMINI_API_KEY --data-file=- --replication-policy=automatic
+
+# 5. Build and deploy backend
+cd backend
+gcloud builds submit --tag us-central1-docker.pkg.dev/YOUR_PROJECT_ID/negotiation-app/backend:latest .
+gcloud run deploy negotiation-backend --image=us-central1-docker.pkg.dev/YOUR_PROJECT_ID/negotiation-app/backend:latest --region=us-central1 --allow-unauthenticated --port=8080 --memory=2Gi --cpu=2 --timeout=3600 --min-instances=1 --set-env-vars="GEMINI_MODEL=gemini-live-2.5-flash-native-audio,GOOGLE_CLOUD_PROJECT=YOUR_PROJECT_ID,GOOGLE_CLOUD_LOCATION=us-central1,GOOGLE_GENAI_USE_VERTEXAI=True" --set-secrets="GEMINI_API_KEY=GEMINI_API_KEY:latest"
+
+# 6. Build and deploy frontend (replace BACKEND_URL with output from step 5)
+cd ../frontend
+gcloud builds submit --config=cloudbuild.yaml .
+gcloud run deploy negotiation-frontend --image=us-central1-docker.pkg.dev/YOUR_PROJECT_ID/negotiation-app/frontend:latest --region=us-central1 --allow-unauthenticated --port=8080 --memory=1Gi --cpu=1
+
+# 7. Update CORS
+gcloud run services update negotiation-backend --region=us-central1 --update-env-vars="CORS_ORIGINS=YOUR_FRONTEND_URL"
+```
 
 ---
 
@@ -391,7 +546,7 @@ For production, store `GEMINI_API_KEY` in Google Secret Manager and reference it
 
 ---
 
-## Testing
+## Automated Tests
 
 ### Backend
 
