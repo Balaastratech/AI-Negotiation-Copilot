@@ -1,4 +1,0 @@
-# file: D:\Balaastra\hackothon\project code\backend\app\services\gemini_client.py
-# hypothesis_version: 6.151.9
-
-[540, 600, 1000, 'AI_DEGRADED', 'AI_RESPONSE', 'AUDIO', 'AUDIO_INTERRUPTED', 'GOOGLE_CLOUD_PROJECT', 'STRATEGY_UPDATE', 'TRANSCRIPT_UPDATE', 'ai', 'audio/pcm', 'audio/pcm;rate=16000', 'coaching', 'gemini-2.0-flash', 'image/jpeg', 'message', 'output_transcription', 'payload', 'response_type', 'speaker', 'text', 'timestamp', 'type', 'user', 'v1alpha', '{context}']
